@@ -76,7 +76,17 @@ codex-cli 0.147.0
 
 ## 授权 3：切换线上技能目录（改你正在用的 autopilot 本体）
 
-**状态：等一个字的指令 ——「切」。** 没这个字我不动线上目录。
+**状态：✅ 已关闭 —— 2026-10-30 23:4x 已切到线上，线上版本 `0.9.0-detour`。**
+
+回滚命令（随时可用，一行）：
+
+```sh
+git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qoder-cn/skills/autopilot status
+```
+
+此外还有一份**脱离 git 的 0.8 快照**：`$HOME/.autopilot/baseline-0.8/`（18 个文件）。
+它是 M1 字节等价回归与迁移彩排的**基线来源** —— 切到 0.9 之后线上目录不再是 0.8，
+没有这份快照，"0.9 与 0.8 逐字节等价"这条结论就没法再复算。
 
 ### 切换会做什么（`tools/cutover.sh --apply`）
 
@@ -142,4 +152,27 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
   元验收 11/11 PASS / 0 SKIP 不变，迁移彩排新增 **16/16 PASS**（MIGRATION.md 每一步真跑）。
   同轮补掉两个真实缺陷：0.8 的 `tasks.json` 不满足 0.9 契约（切过去即死工作区）→ 有了
   `scripts/migrate_tasks.py` 机械迁移；`status.py` 读 `attempts` 但 schema 不认 → 两边对齐。
-- 状态：授权 1、2 关闭；授权 3（切换线上目录）等指令「切」。
+- 2026-10-30 23:4x **授权 3 已执行：线上切到 0.9.0-detour**。
+  - 线上目录 `~/.qoder-cn/skills/autopilot/`：`git init` + 基线提交（`5ffa729`）+ `v0.8-baseline` tag
+    → 覆盖/新增 0.9 实现物（**0.8 的 19 个文件一个没丢**）→ 提交 `0abaace` + `v0.9-detour` tag。
+    0.9 共 77 个文件（tracked）。
+  - **切完后把线上目录当成"用户手里的包"再验一遍**：自测 10/10 · 命令级冒烟 41/41 ·
+    元验收 11/11 PASS / 0 SKIP · 迁移彩排 16/16 · xref 6/6 · 隐私 FAIL 0。
+  - **真实功能冒烟**：用 0.9 真开一个工作区 —— `init.sh` 建出 `.autopilot/` 全套产物 +
+    `sandbox/{.gate,drafts,hypo,proposals,prototype}` + 闸门初值 + `env.json`/`host.json`/
+    `environment.json`；`resume.py` 出接续包；`status.py summary` 出账本视图；
+    `flex-gate.sh check` 对不存在的卡正确退 2。宿主按 `generic-cli` 降级（5 原语全 False，
+    REPORT 须出降级声明）。
+  - **这一轮彩排抓出三个只在"切完之后"才暴露的坑**，都已修（提交 `dda29d0`）：
+    ① `cutover.sh` 硬要求草稿主文件叫 `02-SKILL-0.9.md`，切完的目录里它叫 `SKILL.md`
+       → 切换器在已切换的目录里直接 exit 2 → 改成两个名字都认；
+    ② 迁移彩排与 0.8 样本造样都拿**线上目录**当 0.8 基线，切到 0.9 后就退化成"0.9 → 0.9"，
+       判据全错（彩排从 16/16 掉到 7/16）→ 新增 `tools/baseline08.sh` 按
+       `$AUTOPILOT_LIVE_SKILL` → `$AUTOPILOT_BASELINE_SKILL` → `$HOME/.autopilot/baseline-0.8`
+       → 线上目录 的顺序找一个**真的是 0.8** 的目录（无 `tools/cutover.sh` 且 SKILL.md 无
+       `FLEX_RULES`），找不到就报错并给出照着做的提示；
+    ③ `m1.py` 的基线查找没跟上 → 元验收自测的 T4/T5 改成断言真正的恒等式
+       ——「三条路都掐断时 M1 必须 SKIP，有基线时必须 PASS」，而不是「env 没设就 SKIP」。
+  - 教训：**"切换前全绿"不等于"切换后能用"**。分发包的自证能力必须在**切换后的形态**里验，
+    否则它会安静地退化成"对着自己比较"。
+- 状态：授权 1、2、3 全部关闭。发布动作仍冻结（`git push` / 建仓需另行明确指示）。
