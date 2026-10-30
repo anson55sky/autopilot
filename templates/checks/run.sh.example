@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# 验收脚本模板。规则：
+#   每条验收输出一行：RESULT <A#> PASS|FAIL <说明>
+#   全部 PASS → 退出 0；任何 FAIL → 退出 1
+#   必须是外部可观察的检查：构建、测试、CLI 输出、HTTP、截图 diff、文件产物
+#   禁止「代码里包含某字符串」这类检查
+#   冻结后不可修改（由 MANIFEST.sha256 校验）
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 1
+
+fail=0
+check() {
+  local id="$1" desc="$2"
+  shift 2
+  local out
+  if out="$("$@" 2>&1)"; then
+    printf 'RESULT %s PASS %s\n' "$id" "$desc"
+  else
+    fail=1
+    printf 'RESULT %s FAIL %s :: %s\n' "$id" "$desc" "$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+  fi
+}
+
+# TODO-check: 每条验收一行，替换成真实检查后删除本行
+check A1 "构建通过" npm run build
+check A2 "测试通过" npm test -- --run
+
+exit "$fail"
