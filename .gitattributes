@@ -1,0 +1,13 @@
+# 分发包必须 LF：从 Windows 侧编辑过的文件会带 \r，
+# 让 check.sh 的 RESULT 正则与 shell 执行双双出错（P10）。
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.example text eol=lf
+*.icns binary
+*.png binary
+*.jpg binary
+*.zip binary

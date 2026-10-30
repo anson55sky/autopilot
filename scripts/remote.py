@@ -47,7 +47,7 @@ STOP = {
 
 
 def now_iso():
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def read_text(path, limit=65536):

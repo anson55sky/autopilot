@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 验收脚本模板。规则：
-#   每条验收输出一行：RESULT <A#> PASS|FAIL <说明>
-#   全部 PASS → 退出 0；任何 FAIL → 退出 1
+#   每条验收输出一行：RESULT <A#> PASS|FAIL|SKIP <说明>
+#   全部 PASS → 退出 0；任何 FAIL → 退出 1；SKIP 不算绿（"全绿" = 无 FAIL 且无 SKIP）
 #   必须是外部可观察的检查：构建、测试、CLI 输出、HTTP、截图 diff、文件产物
 #   禁止「代码里包含某字符串」这类检查
 #   冻结后不可修改（由 MANIFEST.sha256 校验）
@@ -21,6 +21,35 @@ check() {
     fail=1
     printf 'RESULT %s FAIL %s :: %s\n' "$id" "$desc" "$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
   fi
+}
+
+# 能力缺失 → SKIP，不写 PASS（B3/B4）。
+# 探测结果在 .autopilot/environment.json（由 init.sh / check.sh run 生成）。
+# 用法: skip <A#> "<说明>"
+skip() {
+  printf 'RESULT %s SKIP %s\n' "$1" "$2"
+}
+
+# 依赖某项本机能力时用这个：能力缺失就 SKIP 并返回 1（调用方自行决定算不算失败）。
+# 用法: need <A#> <能力键> "<说明>"    能力键见 environment.json 的 capabilities
+need() {
+  local id="$1" cap="$2" desc="$3"
+  local f="$ROOT/.autopilot/environment.json"
+  if [ ! -f "$f" ]; then
+    skip "$id" "缺环境探测产物（先跑 init.sh），不宣称通过"
+    return 1
+  fi
+  local v
+  v=$(python3 -c 'import json,sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+v = d.get("capabilities", {}).get(sys.argv[2])
+print("" if v is None else str(v).lower() not in ("", "false", "0", "null"))' "$f" "$cap" 2>/dev/null)
+  if [ "$v" != "True" ]; then
+    skip "$id" "缺能力 $cap"
+    return 1
+  fi
+  printf 'RESULT %s PASS %s\n' "$id" "$desc"
+  return 0
 }
 
 # TODO-check: 每条验收一行，替换成真实检查后删除本行

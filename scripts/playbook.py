@@ -6,7 +6,7 @@
   playbook.py show <root> [--limit 20] [--kind pitfall] [--global-only]
 
 项目记忆: <repo>/.autopilot/playbook.md
-跨项目:   ~/.autopilot/playbook.md（--global 才写）
+跨项目:   $AUTOPILOT_HOME/playbook.md（--global 才写），缺省为家目录下的 .autopilot
 """
 
 import datetime
@@ -15,12 +15,17 @@ import re
 import sys
 
 KINDS = ("pitfall", "skill", "check", "command", "rule")
-GLOBAL_PATH = os.path.expanduser("~/.autopilot/playbook.md")
+AUTOPILOT_HOME = os.environ.get("AUTOPILOT_HOME", os.path.join(os.path.expanduser("~"), ".autopilot"))
+GLOBAL_PATH = os.path.join(AUTOPILOT_HOME, "playbook.md")
 HEADER = "# Playbook\n\n只记「下次还会踩 / 下次还能用」的结论，一条一行。add 自动去重并计数。\n"
 
 
 def now_date():
-    return datetime.date.today().isoformat()
+    """日期标签用 UTC 日，与其他新写的戳同一口径。
+
+    用本地日的话，同一条记忆在两台时区不同的机器上会分裂成"两天"两条。
+    """
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
 
 def path_for(root, use_global=False):

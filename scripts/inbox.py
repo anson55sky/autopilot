@@ -1,15 +1,53 @@
 #!/usr/bin/env python3
-"""autopilot 收件箱：需要人拍板的事全部落到这里，轮次不等人。
+"""autopilot 0.9 收件箱（B8 审批签发者认证）。
+
+0.8 实测暴露的缺陷：`inbox.py answer` 是任何上下文都能调的 CLI，轮次执行器可以
+自行写入 answer 记录并自称"用户口头批准"，所以"已批准"这句话结构上不可信。
+本版本让答复必须带可校验的签发者，且判定只认认证过的记录。
+
+命令面与 0.8 兼容（add/list/answer/export/count，参数名不变；新增 show/approved），
+新字段只加不删；0.8 的 `--answer` 文本字段保留，另增 `--decision`。
+
+签发者认证规则（违反者一律退出码 31，拒绝落盘）:
+  1. answer 必须带 `--by <human|supervisor>`；
+  2. `--by human` 必须同时给 `--ref <宿主交互引用>`（如宿主 interaction id、
+     终端里人亲填的凭据引用），--by/--ref 两者缺一 → 31；
+  3. `--by supervisor` 允许无 ref，但必须 `--note <依据>`（说明监督者凭什么签），
+     否则 → 31；
+  4. 判定语义 is_approved(id)：仅当 answered_by ∈ {human, supervisor} 且
+     （answered_by == human 时 ref 非空）才为真；
+  5. 0.8 时代的旧记录（answer 事件里没有 answered_by 字段）一律视为**未批准**，
+     list 里标注 `legacy-unauthenticated`；不改写、不删除历史记录。
+
+状态机（防自问自答一气呵成）:
+  open → presented → answered
+  add 只产生 open；list / show 读取时把仍处于 open 的条目标记为 presented
+  （向 inbox.jsonl 追加 present 事件，只追加不改写）；
+  answer 只能作用于 presented 或 open，但作用于 open 时 `--ref` 必填——
+  不管 --by 是谁。即 add 与 answer 之间必须存在一次 list/show 读取，
+  否则签发者必须拿出宿主交互引用，执行器无法在同一流里自问自答。
+
+退出码（固定，供上层判分支）:
+  0  成功 / 已批准（approved）
+  2  用法错误、条目不存在（与 0.8 一致）
+  30 approved 查询：该条目未批准（含 legacy-unauthenticated）
+  31 认证缺失：缺 --by / human 缺 ref / supervisor 缺 note / open 状态答复缺 ref
+
+事件走 <repo>/.autopilot/inbox.jsonl（只追加，崩溃不丢），当前状态由事件推导。
+时间戳一律带时区偏移的 ISO8601（C3：裸时间戳会让下游 aware/naive 相减抛 TypeError）。
+路径全部来自参数（<repo> 或 --repo，允许 {REPO_ROOT} 占位由上层替换），本文件不含绝对路径。
 
 用法:
-  inbox.py add <root> --kind approval|decision|question|blocker --q "问题" \
-          [--options "a|b"] [--recommend a] [--task T-05] [--cost "代价"] [--round N]
-  inbox.py list <root> [--all] [--json]
-  inbox.py answer <root> <I-id> --answer "答复" [--by human|supervisor]
-  inbox.py export <root>          # 生成 inbox.md
-  inbox.py count <root>           # 未决条数（status.py 用）
-
-事件走 .autopilot/inbox.jsonl（只追加，崩溃不丢），当前状态由事件推导。
+  inbox.py add      <repo|--repo X> --kind approval|decision|question|blocker --q "问题" \
+                    [--options "a|b"] [--recommend a] [--task T-05] [--cost "代价"] [--round N]
+  inbox.py list     <repo|--repo X> [--all] [--json]        # 读取即标记 presented
+  inbox.py show     <repo|--repo X> <I-id> [--json]         # 读取即标记 presented
+  inbox.py answer   <repo|--repo X> <I-id> --by human|supervisor \
+                    (--answer "答复文本" | --decision approve|reject | 两者都给) \
+                    [--ref <宿主交互引用>] [--note <依据>]
+  inbox.py approved <repo|--repo X> <I-id> [--json]         # is_approved(id)
+  inbox.py count    <repo|--repo X>                          # 未决条数（status.py 用）
+  inbox.py export   <repo|--repo X>                          # 生成 inbox.md
 """
 
 import datetime
@@ -18,10 +56,35 @@ import os
 import sys
 
 KINDS = ("approval", "decision", "question", "blocker")
+BYS = ("human", "supervisor")
+
+AUTH_HUMAN = "human-authenticated"
+AUTH_SUPERVISOR = "supervisor-attested"
+AUTH_LEGACY = "legacy-unauthenticated"
+AUTH_BAD = "unauthenticated"
 
 
 def now_iso():
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    """新写的戳一律 UTC（+00:00）；历史戳带本地偏移照样读得懂（见 ts_key）。"""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def ts_key(text):
+    """排序键：按**绝对时刻**排，不按字符串排。
+
+    同一个 inbox 里可能混着本地偏移的老戳和 UTC 的新戳 ——
+    按字符串排会把 12:00+00:00 排到 13:00+08:00 前面，而后者其实更早。
+    """
+    raw = (text or "").strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return (1, raw)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return (0, dt.timestamp())
 
 
 def load_events(ap):
@@ -46,22 +109,64 @@ def append_event(ap, event):
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def auth_of(answered_by, ref):
+    if answered_by == "human":
+        return AUTH_HUMAN if (ref or "").strip() else AUTH_BAD
+    if answered_by == "supervisor":
+        return AUTH_SUPERVISOR
+    return AUTH_BAD
+
+
 def current_items(events):
+    """由事件流推导当前状态。只读推导，从不改写历史事件。"""
     items = {}
     for e in events:
         iid = e.get("id")
         if not iid:
             continue
-        if e.get("type") == "open":
+        etype = e.get("type")
+        if etype == "open":
             items[iid] = dict(e, status="open")
-        elif e.get("type") == "answer" and iid in items:
-            items[iid].update(status="answered", answer=e.get("answer", ""),
-                              answered_by=e.get("by", "human"), answered_at=e.get("ts", ""))
+        elif etype == "present":
+            if iid in items and items[iid]["status"] == "open":
+                items[iid]["status"] = "presented"
+        elif etype == "answer" and iid in items and items[iid]["status"] != "answered":
+            it = items[iid]
+            it.update(status="answered",
+                      answer=e.get("answer", ""),
+                      decision=e.get("decision", ""),
+                      answered_at=e.get("answered_at") or e.get("ts", ""))
+            if "answered_by" in e:
+                by = e.get("answered_by") or ""
+                it["answered_by"] = by
+                it["ref"] = e.get("ref", "")
+                it["note"] = e.get("note", "")
+                it["auth"] = auth_of(by, it["ref"])
+            else:
+                # 0.8 旧记录：没有 answered_by，无法认证签发者 → 一律视为未批准。
+                it["answered_by"] = ""
+                it["legacy_by"] = e.get("by", "")
+                it["ref"] = ""
+                it["note"] = e.get("note", "")
+                it["auth"] = AUTH_LEGACY
     return items
 
 
+def is_approved(items, iid):
+    """判定语义：只有认证过的答复才算批准。legacy / open / presented 全为假。"""
+    it = items.get(iid)
+    if not it or it.get("status") != "answered":
+        return False
+    by = (it.get("answered_by") or "").strip()
+    if by not in BYS:
+        return False
+    if by == "human" and not (it.get("ref") or "").strip():
+        return False
+    return True
+
+
 def sorted_items(items):
-    return sorted(items.values(), key=lambda i: (i["status"] != "open", i.get("ts", "")))
+    return sorted(items.values(), key=lambda i: (i["status"] == "answered", ts_key(i.get("ts", ""))))
 
 
 def next_id(items):
@@ -71,27 +176,37 @@ def next_id(items):
             nums.append(int(str(iid).split("-")[1]))
         except (IndexError, ValueError):
             continue
-    return f"I-{(max(nums) + 1) if nums else 1}"
+    return "I-%d" % ((max(nums) + 1) if nums else 1)
+
+
+def mark_presented(ap, items):
+    """把仍处于 open 的条目标记为 presented（追加事件，不改写旧行）。"""
+    for iid, it in sorted(items.items()):
+        if it["status"] == "open":
+            append_event(ap, {"type": "present", "id": iid, "via": "read"})
+            it["status"] = "presented"
 
 
 def render_md(root, items):
     ap = os.path.join(root, ".autopilot")
-    open_items = [i for i in sorted_items(items) if i["status"] == "open"]
+    open_items = [i for i in sorted_items(items) if i["status"] in ("open", "presented")]
     lines = ["# 收件箱", "",
              f"未决 {len(open_items)} 条 · 更新于 {now_iso()}", "",
-             "答复：`python3 $SKILL/scripts/inbox.py answer <repo> <I-id> --answer \"...\"`", ""]
+             "答复：`python3 {SKILL_ROOT}/scripts/inbox.py answer {REPO_ROOT} <I-id>"
+             " --by human --ref <宿主交互引用> --answer \"...\"`", ""]
     if not open_items:
         lines.append("（没有待决事项）")
     for i in open_items:
-        lines.append(f"## {i['id']} · {i.get('kind', 'decision')}"
-                     f"{' · ' + i['task'] if i.get('task') else ''}")
+        lines.append("## %s · %s%s" % (
+            i["id"], i.get("kind", "decision"),
+            (" · " + i["task"]) if i.get("task") else ""))
         lines.append("")
         lines.append(i.get("question", ""))
         if i.get("options"):
             lines.append("")
             for opt in i["options"]:
                 mark = " **(推荐)**" if opt == i.get("recommend") else ""
-                lines.append(f"- `{opt}`{mark}")
+                lines.append("- `%s`%s" % (opt, mark))
         if i.get("cost"):
             lines.append("")
             lines.append(f"代价：{i['cost']}")
@@ -100,8 +215,12 @@ def render_md(root, items):
     if answered:
         lines += ["---", "", "## 已决", ""]
         for i in answered[-20:]:
-            lines.append(f"- {i['id']} — {i.get('question', '')} → **{i.get('answer', '')}**"
-                         f"（{i.get('answered_by', 'human')} · {i.get('answered_at', '')}）")
+            tag = i.get("auth", AUTH_LEGACY)
+            ref = (" · ref=" + i["ref"]) if i.get("ref") else ""
+            lines.append("- %s — %s → **%s**（%s%s · %s%s）" % (
+                i["id"], i.get("question", ""), i.get("answer", ""), tag, ref,
+                i.get("answered_at", ""),
+                "" if tag != AUTH_LEGACY else " · 旧记录未认证，视为未批准"))
     with open(os.path.join(ap, "inbox.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -138,6 +257,11 @@ def parse_opts(args, spec):
     return pos, opts
 
 
+def die(msg, code):
+    print(f"REJECT {code} {msg}")
+    return code
+
+
 def cmd_add(root, opts):
     ap = os.path.join(root, ".autopilot")
     if not os.path.isdir(ap):
@@ -145,11 +269,11 @@ def cmd_add(root, opts):
         return 2
     question = (opts.get("q") or opts.get("question") or "").strip()
     if not question:
-        print('用法: inbox.py add <root> --kind approval --q "问题" [--options "a|b"]')
+        print('用法: inbox.py add <repo> --kind approval --q "问题" [--options "a|b"]')
         return 2
     kind = opts.get("kind") or "decision"
     if kind not in KINDS:
-        print(f"kind 只能是 {'/'.join(KINDS)}")
+        print("kind 只能是 %s" % "/".join(KINDS))
         return 2
     items = current_items(load_events(ap))
     iid = next_id(items)
@@ -160,13 +284,16 @@ def cmd_add(root, opts):
         "task": opts.get("task") or "",
         "cost": opts.get("cost") or "",
         "round": opts.get("round") or "",
+        "state": "open",
     }
     append_event(ap, event)
     ledger_append(ap, {"type": "inbox", "action": "open", "id": iid, "kind": kind})
     items = current_items(load_events(ap))
     render_md(root, items)
     print(f"{iid} 已记录（{kind}）：{question}")
-    print(f"答复: python3 {sys.argv[0]} answer {root} {iid} --answer \"...\"")
+    print("答复: python3 {SKILL_ROOT}/scripts/inbox.py answer <repo> "
+          f"{iid} --by human --ref <宿主交互引用> --answer \"...\""
+          "（执行器无 answer 权限，只能 add）")
     return 0
 
 
@@ -177,43 +304,119 @@ def cmd_answer(root, iid, opts):
         print(f"没有这个条目: {iid}")
         return 2
     if items[iid]["status"] == "answered":
-        print(f"{iid} 已经答复过：{items[iid].get('answer', '')}")
+        it = items[iid]
+        print(f"{iid} 已经答复过：{it.get('answer', '')}"
+              f"（{it.get('auth', AUTH_LEGACY)}）")
         return 0
+
+    # —— 认证规则（B8），任何一条不满足都拒绝落盘 ——
+    by = (opts.get("by") or "").strip()
+    if by not in BYS:
+        return die(f"{iid}: answer 必须带签发者 --by {'|'.join(BYS)}（B8）", 31)
+    ref = (opts.get("ref") or "").strip()
+    note = (opts.get("note") or "").strip()
+    state = items[iid]["status"]  # open 或 presented
+    if by == "human" and not ref:
+        return die(f"{iid}: --by human 必须同时给 --ref <宿主交互引用>", 31)
+    if by == "supervisor" and not note:
+        return die(f"{iid}: --by supervisor 必须给 --note <依据>", 31)
+    if state == "open" and not ref:
+        # add 与 answer 之间没有出现过一次 list/show 读取，
+        # 又没有宿主交互引用可查 → 按自问自答嫌疑拒绝。
+        return die(f"{iid}: 条目尚未经 list/show 呈现（state=open），"
+                   "answer 时 --ref 必填（防自问自答）", 31)
+
     answer = (opts.get("answer") or "").strip()
-    if not answer:
-        print(f'用法: inbox.py answer {root} {iid} --answer "..."')
+    decision = (opts.get("decision") or "").strip()
+    if not answer and not decision:
+        print(f'用法: inbox.py answer <repo> {iid} --by ... (--answer "..." | --decision ...)')
         return 2
-    by = opts.get("by") or "human"
-    append_event(ap, {"type": "answer", "id": iid, "answer": answer, "by": by})
-    ledger_append(ap, {"type": "inbox", "action": "answer", "id": iid, "by": by})
+
+    ts = now_iso()
+    append_event(ap, {
+        "type": "answer", "id": iid,
+        "answer": answer, "decision": decision,
+        "by": by,                       # 0.8 兼容字段
+        "answered_by": by,              # 0.9 认证字段
+        "ref": ref, "note": note,
+        "answered_at": ts,
+    })
+    ledger_append(ap, {"type": "inbox", "action": "answer", "id": iid, "by": by,
+                       "answered_by": by, "ref": ref, "auth": auth_of(by, ref)})
     items = current_items(load_events(ap))
     render_md(root, items)
-    rest = sum(1 for i in items.values() if i["status"] == "open")
-    print(f"{iid} 已答复（{by}）：{answer}" + (f"；还剩 {rest} 条未决" if rest else "；收件箱已清空"))
+    rest = sum(1 for i in items.values() if i["status"] in ("open", "presented"))
+    print(f"{iid} 已答复（{auth_of(by, ref)}）：{answer or decision}"
+          + (f"；还剩 {rest} 条未决" if rest else "；收件箱已清空"))
     return 0
 
 
 def cmd_list(root, opts):
     ap = os.path.join(root, ".autopilot")
-    items = sorted_items(current_items(load_events(ap)))
-    if not opts.get("all"):
-        items = [i for i in items if i["status"] == "open"]
+    items = current_items(load_events(ap))
     if opts.get("json"):
-        print(json.dumps(items, ensure_ascii=False, indent=2))
+        # --json 同样是"读取"：先标记 presented，再输出推导后的最新状态。
+        mark_presented(ap, items)
+        out = sorted_items(items)
+        if not opts.get("all"):
+            out = [i for i in out if i["status"] != "answered"]
+        print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
-    if not items:
+    mark_presented(ap, items)
+    shown = sorted_items(items)
+    if not opts.get("all"):
+        shown = [i for i in shown if i["status"] != "answered"]
+    if not shown:
         print("收件箱为空")
         return 0
-    for i in items:
-        tail = f" → {i.get('answer')}" if i["status"] == "answered" else ""
-        print(f"{i['id']:5} [{i.get('kind', '?'):8}] {i.get('question', '')}{tail}")
+    for i in shown:
+        if i["status"] == "answered":
+            tag = i.get("auth", AUTH_LEGACY)
+            tail = f" → {i.get('answer') or i.get('decision')}（{tag}）"
+            if tag == AUTH_LEGACY:
+                tail += " [legacy-unauthenticated 视为未批准]"
+        else:
+            tail = ""
+        print(f"{i['id']:5} [{i.get('kind', '?'):8}] [{i['status']:10}] "
+              f"{i.get('question', '')}{tail}")
     return 0
+
+
+def cmd_show(root, iid, opts):
+    ap = os.path.join(root, ".autopilot")
+    items = current_items(load_events(ap))
+    if iid not in items:
+        print(f"没有这个条目: {iid}")
+        return 2
+    mark_presented(ap, {iid: items[iid]})
+    it = items[iid]
+    if opts.get("json"):
+        print(json.dumps(it, ensure_ascii=False, indent=2))
+        return 0
+    for k in ("id", "kind", "task", "round", "status", "question", "options",
+              "recommend", "cost", "answer", "decision", "answered_by", "ref",
+              "note", "auth", "answered_at", "ts"):
+        if it.get(k) not in (None, "", []):
+            print(f"{k}: {it[k]}")
+    print(f"approved: {'true' if is_approved(items, iid) else 'false'}")
+    return 0
+
+
+def cmd_approved(root, iid, opts):
+    items = current_items(load_events(os.path.join(root, ".autopilot")))
+    ok = is_approved(items, iid)
+    auth = items.get(iid, {}).get("auth", "missing") if iid in items else "missing"
+    if opts.get("json"):
+        print(json.dumps({"id": iid, "approved": ok, "auth": auth}, ensure_ascii=False))
+    else:
+        print("true" if ok else "false")
+    return 0 if ok else 30
 
 
 def cmd_count(root):
     ap = os.path.join(root, ".autopilot")
     items = current_items(load_events(ap))
-    print(sum(1 for i in items.values() if i["status"] == "open"))
+    print(sum(1 for i in items.values() if i["status"] in ("open", "presented")))
     return 0
 
 
@@ -231,18 +434,27 @@ def main():
         return 2
     cmd = sys.argv[1]
     pos, opts = parse_opts(sys.argv[2:], {})
-    if not pos:
+    root = opts.get("repo") or (pos[0] if pos else "")
+    if not root:
         print(__doc__)
         return 2
-    root = os.path.abspath(pos[0])
+    root = os.path.abspath(os.path.expanduser(str(root)))
+    # 用法兼容：`answer <root> <I-id>` 与 `answer --repo <root> <I-id>` 都接受。
+    iid = pos[1] if len(pos) >= 2 else (pos[0] if (pos and opts.get("repo")) else None)
 
     if cmd == "add":
         return cmd_add(root, opts)
     if cmd == "answer":
-        if len(pos) < 2:
-            print(f'用法: inbox.py answer {root} <I-id> --answer "..."')
+        if not iid:
+            print('用法: inbox.py answer <repo> <I-id> --by human|supervisor '
+                  '--answer "..." [--ref ...] [--note ...]')
             return 2
-        return cmd_answer(root, pos[1], opts)
+        return cmd_answer(root, iid, opts)
+    if cmd in ("show", "approved"):
+        if not iid:
+            print(f"用法: inbox.py {cmd} <repo> <I-id> [--json]")
+            return 2
+        return (cmd_show if cmd == "show" else cmd_approved)(root, iid, opts)
     if cmd == "list":
         return cmd_list(root, opts)
     if cmd == "count":

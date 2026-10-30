@@ -10,7 +10,7 @@
   queue.py drop <id>
   queue.py show <id>
 
-队列目录: ~/.autopilot/queue（可用 AUTOPILOT_HOME 覆盖）
+队列目录: $AUTOPILOT_HOME/queue（可用 AUTOPILOT_HOME 覆盖，缺省为家目录下的 .autopilot）
 """
 
 import datetime
@@ -19,12 +19,12 @@ import os
 import re
 import sys
 
-HOME = os.environ.get("AUTOPILOT_HOME", os.path.expanduser("~/.autopilot"))
+HOME = os.environ.get("AUTOPILOT_HOME", os.path.join(os.path.expanduser("~"), ".autopilot"))
 QUEUE = os.path.join(HOME, "queue")
 
 
 def now_iso():
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def slug(text):
@@ -90,7 +90,8 @@ def cmd_add(opts):
         print(f"仓库不存在: {repo}")
         return 2
     os.makedirs(QUEUE, exist_ok=True)
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # 文件名戳用 UTC：与 created 字段同一口径，换时区后队列排序不再乱。
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%SZ")
     path = os.path.join(QUEUE, f"{stamp}-{slug(goal)}.md")
     write(path, {"repo": repo, "mode": opts.get("mode") or "auto",
                  "max_rounds": opts.get("max-rounds") or "",

@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""autopilot 能力发现：索引本机技能，按任务匹配技能 / MCP / 智能体。
+"""autopilot 能力发现 v0.9：按配置扫描技能目录，索引可加载技能并做任务匹配。
 
 用法:
-  discover.py scan  [repo] [--all-apps]
+  discover.py scan  [repo] [--all-apps] [--roots LIST] [--config PATH] [--json]
   discover.py match <repo> "<任务描述>" [--top 8] [--type skill|mcp|agent] [--json]
   discover.py stats [repo]
 
-索引写到 <repo>/.autopilot/capabilities.json 与 CAPABILITIES.md。
+技能根目录只来自配置，优先级（高→低）:
+  1. --roots 路径列表（命令行）
+  2. 环境变量 AUTOPILOT_SKILL_ROOTS（路径列表：POSIX 用 ":"，Windows 用 ";"）
+  3. <repo>/.autopilot/env.json 的 skill_roots
+  4. 配置文件（--config，或 <skill_root>/config/skill-roots.json）的 roots
+  5. 内置默认（空列表——不猜任何应用目录）
+
+项目级技能子目录来自配置 tool_subdirs（工具 id → 相对仓库根的子目录）。
+索引写到 <repo>/.autopilot/capabilities.json（机器可读）与 CAPABILITIES.md（人读）。
 匹配用词法打分做预筛，最终取舍由控制器（模型）决定。
 """
 
+import argparse
 import datetime
 import json
 import math
@@ -17,15 +26,8 @@ import os
 import re
 import sys
 
-DEFAULT_ROOTS = ["~/.qoder-cn/skills", "~/.agents/skills"]
-EXTRA_ROOTS = [
-    "~/.qoder/skills",
-    "~/.workbuddy/skills",
-    "~/.codex/skills",
-    "~/.claude/skills",
-    "~/.codebuddy/skills",
-    "~/.qclaw/skills",
-]
+# 内置默认刻意为空：技能库在哪属于配置，不属于代码（不写死任何应用目录名）。
+DEFAULT_ROOTS = []
 
 CJK = re.compile(r"[\u4e00-\u9fff]+")
 
@@ -77,7 +79,7 @@ SYNONYMS = {
 
 
 def now_iso():
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def read_text(path, limit=16384):
@@ -86,6 +88,130 @@ def read_text(path, limit=16384):
             return f.read(limit)
     except OSError:
         return ""
+
+
+def load_json(path):
+    """读 JSON；读不到或坏了返回 None（不抛异常）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def home_dir():
+    """用户主目录：只认 HOME / USERPROFILE 这类通用变量，不猜任何应用目录。"""
+    return os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
+
+
+def expand_tilde(path):
+    """展开 ~ 前缀（只展开成通用主目录，不拼接任何应用子目录）。"""
+    if not path:
+        return path
+    if path == "~":
+        return home_dir() or path
+    if path.startswith("~/") or path.startswith("~\\"):  # M6-allow 前缀判定，非路径常量
+        base = home_dir()
+        if not base:
+            return path
+        return os.path.join(base, path[2:])
+    return path
+
+
+def split_path_list(raw):
+    """路径列表 → 列表。分隔符：POSIX 用 ":"，Windows 用 ";"。"""
+    if not raw:
+        return []
+    parts = raw.split(os.pathsep)
+    if os.pathsep != ";":
+        extra = []
+        for p in parts:
+            extra.extend(p.split(";"))
+        parts = extra
+    out = []
+    for p in parts:
+        p = p.strip()
+        if p:
+            out.append(p)
+    return out
+
+
+def script_dir():
+    return os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
+
+
+def find_skill_root(start):
+    """向上找带 templates/ 或 config/ 的目录；找不到就用脚本目录的上一级。"""
+    d = start
+    for _ in range(8):
+        if os.path.isdir(os.path.join(d, "templates")) or os.path.isdir(os.path.join(d, "config")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return os.path.dirname(start)
+
+
+def default_config_path():
+    """技能根目录下的默认配置文件（不存在则返回 None）。"""
+    path = os.path.join(find_skill_root(script_dir()), "config", "skill-roots.json")
+    return path if os.path.isfile(path) else None
+
+
+def resolve_sources(repo, cli_roots, config_path):
+    """解析配置源 → (roots, tool_subdirs, tool_roots, source, config_used)。
+
+    source 说明 roots 来自哪一级：cli / env / env.json / config / default。
+    """
+    env_doc = load_json(os.path.join(repo, ".autopilot", "env.json"))
+    if not isinstance(env_doc, dict):
+        env_doc = {}
+
+    cfg_used = config_path
+    if not cfg_used:
+        cfg_used = default_config_path()
+    cfg = {}
+    if cfg_used:
+        doc = load_json(cfg_used)
+        if isinstance(doc, dict):
+            cfg = doc
+        elif os.path.exists(cfg_used):
+            print("警告: 配置文件不是合法 JSON，已忽略: %s" % cfg_used, file=sys.stderr)
+
+    env_raw = os.environ.get("AUTOPILOT_SKILL_ROOTS", "")
+    if cli_roots:
+        roots = split_path_list(cli_roots)
+        source = "cli"
+    elif env_raw:
+        roots = split_path_list(env_raw)
+        source = "env"
+    elif isinstance(env_doc.get("skill_roots"), list) and env_doc.get("skill_roots"):
+        roots = [str(r) for r in env_doc["skill_roots"]]
+        source = "env.json"
+    elif isinstance(cfg.get("roots"), list) and cfg.get("roots"):
+        roots = [str(r) for r in cfg["roots"]]
+        source = "config"
+    else:
+        roots = list(DEFAULT_ROOTS)
+        source = "default"
+
+    # 工具子目录 / 工具根目录：env.json 覆盖配置文件
+    tool_subdirs = {}
+    for src in (cfg.get("tool_subdirs"), env_doc.get("tool_subdirs")):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, str) and v.strip():
+                    tool_subdirs[str(k)] = v.strip()
+    tool_roots = {}
+    for src in (cfg.get("tool_roots"), env_doc.get("tool_roots")):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if isinstance(v, list):
+                    tool_roots[str(k)] = [str(x) for x in v]
+                elif isinstance(v, str) and v.strip():
+                    tool_roots[str(k)] = [v.strip()]
+    return roots, tool_subdirs, tool_roots, source, cfg_used
 
 
 def parse_frontmatter(text):
@@ -156,7 +282,7 @@ def expand(q_tokens):
     return q_tokens + [t for t in extra if t not in q_tokens]
 
 
-def load_skill(raw_root, root_priority):
+def load_skill(raw_root, root_priority, scan_root):
     path = os.path.join(raw_root, "SKILL.md")
     text = read_text(path)
     if not text:
@@ -175,40 +301,110 @@ def load_skill(raw_root, root_priority):
         "key": normalize_name(name or dirname),
         "desc": " ".join(desc.split()),
         "path": raw_root,
-        "root": os.path.expanduser(raw_root.rsplit("/skills", 1)[0]) if "/skills" in raw_root else raw_root,
+        "root": scan_root,
         "size": len(text),
         "priority": root_priority,
     }
 
 
-def collect(repo, all_apps=False):
-    roots = list(DEFAULT_ROOTS)
-    if all_apps:
-        roots += EXTRA_ROOTS
-    env_roots = os.environ.get("AUTOPILOT_SKILL_ROOTS")
-    if env_roots:
-        roots = [r for r in env_roots.split(":") if r]
+def skill_dirs_under(root):
+    """在 root 下找含 SKILL.md 的目录。
 
-    candidates, scanned = [], 0
-    for prio, root in enumerate(roots):
-        base = os.path.expanduser(root)
+    支持两种布局：<root>/<技能>/SKILL.md 与 <root>/<工具>/<子目录>/<技能>/SKILL.md。
+    目录名不写死任何应用名——具体子目录由配置 tool_subdirs 给出，未声明的也按通用两层查找。
+    """
+    found = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError:
+        return found
+    for entry in entries:
+        if entry.startswith(".") or entry.startswith("_bak"):
+            continue
+        p = os.path.join(root, entry)
+        if not os.path.isdir(p):
+            continue
+        if os.path.isfile(os.path.join(p, "SKILL.md")):
+            found.append(p)
+            continue
+        try:
+            subs = sorted(os.listdir(p))
+        except OSError:
+            continue
+        for sub in subs:
+            if sub.startswith("."):
+                continue
+            sp = os.path.join(p, sub)
+            if not os.path.isdir(sp):
+                continue
+            if os.path.isfile(os.path.join(sp, "SKILL.md")):
+                found.append(sp)
+                continue
+            try:
+                subs2 = sorted(os.listdir(sp))
+            except OSError:
+                continue
+            for s2 in subs2:
+                s2p = os.path.join(sp, s2)
+                if os.path.isdir(s2p) and os.path.isfile(os.path.join(s2p, "SKILL.md")):
+                    found.append(s2p)
+    return found
+
+
+def project_skill_dirs(repo, tool_subdirs):
+    """项目级技能目录：来自配置 tool_subdirs（工具 id → 相对仓库根的子目录）。"""
+    found = []
+    for tool in sorted(tool_subdirs):
+        sub = tool_subdirs[tool]
+        if not sub or os.path.isabs(sub):
+            continue
+        parts = [p for p in sub.replace("\\", "/").split("/") if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts):
+            continue
+        d = os.path.join(repo, *parts)
+        if not os.path.isdir(d):
+            continue
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            p = os.path.join(d, entry)
+            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
+                found.append((p, tool))
+    return found
+
+
+def collect(repo, roots, tool_subdirs, tool_roots, all_apps):
+    scan_roots = []
+    for r in roots:
+        scan_roots.append((expand_tilde(r), ""))
+    if all_apps:
+        for tool in sorted(tool_roots):
+            for r in tool_roots[tool]:
+                scan_roots.append((expand_tilde(r), tool))
+
+    candidates, scanned, used_roots = [], 0, []
+    for prio, (root, tool) in enumerate(scan_roots):
+        base = os.path.abspath(expand_tilde(root))
         if not os.path.isdir(base):
             continue
-        for entry in sorted(os.listdir(base)):
-            if entry.startswith(".") or entry.startswith("_bak"):
-                continue
-            candidate = load_skill(os.path.join(base, entry), prio)
-            if candidate:
-                candidates.append(candidate)
+        used_roots.append(base)
+        for d in skill_dirs_under(base):
+            cand = load_skill(d, prio, base)
+            if cand:
+                cand["tool"] = tool
+                candidates.append(cand)
                 scanned += 1
 
-    project_skills = os.path.join(repo, ".qoder", "skills")
-    if os.path.isdir(project_skills):
-        for entry in sorted(os.listdir(project_skills)):
-            candidate = load_skill(os.path.join(project_skills, entry), -1)
-            if candidate:
-                candidates.append(candidate)
-                scanned += 1
+    for p, tool in project_skill_dirs(repo, tool_subdirs):
+        cand = load_skill(p, -1, repo)
+        if cand:
+            cand["tool"] = tool
+            candidates.append(cand)
+            scanned += 1
 
     chosen = {}
     duplicates = 0
@@ -227,17 +423,22 @@ def collect(repo, all_apps=False):
             prev["duplicates"] = prev.get("duplicates", 0) + 1
 
     skills = sorted(chosen.values(), key=lambda c: c["name"].lower())
-    return skills, scanned, duplicates, [os.path.expanduser(r) for r in roots]
+    return skills, scanned, duplicates, used_roots
 
 
-def cmd_scan(repo, all_apps=False):
+def cmd_scan(repo, opts):
     ap = os.path.join(repo, ".autopilot")
     os.makedirs(ap, exist_ok=True)
-    skills, scanned, duplicates, roots = collect(repo, all_apps)
+    roots, tool_subdirs, tool_roots, source, cfg_used = resolve_sources(
+        repo, opts.get("roots"), opts.get("config"))
+    skills, scanned, duplicates, used_roots = collect(
+        repo, roots, tool_subdirs, tool_roots, opts.get("all_apps"))
 
     doc = {
         "generated_at": now_iso(),
-        "roots": roots,
+        "roots": used_roots,
+        "roots_source": source,
+        "config": os.path.basename(cfg_used) if cfg_used else "",
         "scanned": scanned,
         "unique": len(skills),
         "duplicates": duplicates,
@@ -260,6 +461,7 @@ def cmd_scan(repo, all_apps=False):
         "# CAPABILITIES",
         "",
         f"> 生成于 {doc['generated_at']} · 扫描 {scanned} · 去重后 {len(skills)} · 重复 {duplicates}",
+        f"> 根目录来源: {source}（配置决定，代码不猜路径）",
         "> 不要整份读进上下文：用 `discover.py match` 取前 N。",
         "",
         "## Skills",
@@ -276,7 +478,22 @@ def cmd_scan(repo, all_apps=False):
     with open(index_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
+    if opts.get("json"):
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+        return 0
+
+    if opts.get("quiet"):
+        return 0
+
     print(f"技能 {scanned} 个 → 去重 {len(skills)} 个（重复 {duplicates}）")
+    if not used_roots:
+        print("未配置技能根目录：用 --roots / AUTOPILOT_SKILL_ROOTS / .autopilot/env.json / 配置文件 之一配置")
+    else:
+        print(f"根目录来源: {source}（{len(used_roots)} 个）")
+    for s in skills[:50]:
+        print(f"- {s['load']} — {s['desc'][:80]}")
+    if len(skills) > 50:
+        print(f"- …（其余 {len(skills) - 50} 个见 capabilities.json）")
     print(f"索引: {os.path.join(ap, 'capabilities.json')}")
     print(f"清单: {index_path}")
     return 0
@@ -302,11 +519,16 @@ def load_mcp_agents(ap):
     return items
 
 
-def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=False):
+def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=False, opts=None):
+    opts = opts or {}
     ap = os.path.join(repo, ".autopilot")
     doc_path = os.path.join(ap, "capabilities.json")
     if not os.path.exists(doc_path):
-        cmd_scan(repo)
+        # 顺带建索引时不要把索引 JSON 打到 stdout（会污染 match 的输出）
+        scan_opts = dict(opts)
+        scan_opts["json"] = False
+        scan_opts["quiet"] = True
+        cmd_scan(repo, scan_opts)
     with open(doc_path, encoding="utf-8") as f:
         doc = json.load(f)
 
@@ -316,10 +538,9 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
     policy = {}
     pol_path = os.path.join(ap, "tool-policy.json")
     if os.path.exists(pol_path):
-        try:
-            policy = json.load(open(pol_path, encoding="utf-8"))
-        except json.JSONDecodeError:
-            policy = {}
+        pol = load_json(pol_path)
+        if isinstance(pol, dict):
+            policy = pol
 
     banned = {normalize_name(b) for b in policy.get("ban", [])}
 
@@ -344,10 +565,8 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
 
     remote_path = os.path.join(ap, "remote", "registry.json")
     if os.path.exists(remote_path):
-        try:
-            remote_items = json.load(open(remote_path, encoding="utf-8")).get("items", [])
-        except json.JSONDecodeError:
-            remote_items = []
+        remote_doc = load_json(remote_path)
+        remote_items = remote_doc.get("items", []) if isinstance(remote_doc, dict) else []
         for item in remote_items:
             if item.get("blocked") and not include_blocked:
                 continue
@@ -416,16 +635,80 @@ def cmd_stats(repo):
     print(f"生成: {doc.get('generated_at')}")
     print(f"扫描: {doc.get('scanned')}  去重: {doc.get('unique')}  重复: {doc.get('duplicates')}")
     print(f"根目录: {', '.join(doc.get('roots', []))}")
+    print(f"根目录来源: {doc.get('roots_source', '?')}")
     agents = load_mcp_agents(os.path.join(repo, ".autopilot"))
     print(f"MCP 条目: {len(agents['mcp'])}  智能体条目: {len(agents['agent'])}")
     remote_path = os.path.join(repo, ".autopilot", "remote", "registry.json")
-    try:
-        remote_items = json.load(open(remote_path, encoding="utf-8")).get("items", [])
-    except (FileNotFoundError, json.JSONDecodeError):
-        remote_items = []
+    remote_doc = load_json(remote_path)
+    remote_items = remote_doc.get("items", []) if isinstance(remote_doc, dict) else []
     blocked = sum(1 for i in remote_items if i.get("blocked"))
     print(f"远程条目: {len(remote_items)}（blocked {blocked}）")
     return 0
+
+
+def translate_argparse_error(message):
+    """把 argparse 的英文报错翻成中文（用户输入问题不许吐 traceback）。"""
+    m = re.search(r"the following arguments are required: (.*)", message)
+    if m:
+        return "缺少必需参数: " + m.group(1)
+    m = re.search(r"invalid choice: '(.*?)'\s*\(choose from (.*)\)", message)
+    if m:
+        return "未知子命令: %s（可选: %s）" % (m.group(1), m.group(2))
+    m = re.search(r"unrecognized arguments: (.*)", message)
+    if m:
+        return "未知参数: " + m.group(1)
+    m = re.search(r"argument (\S+): invalid (\S+) value: '(.*)'", message)
+    if m:
+        return "参数 %s 取值非法（%s）: %s" % (m.group(1), m.group(2), m.group(3))
+    return message
+
+
+class ChineseParser(argparse.ArgumentParser):
+    """参数错误用中文报（不吐 traceback），退出码 2。"""
+
+    def error(self, message):
+        sys.stderr.write("错误: %s\n" % translate_argparse_error(message))
+        sys.stderr.write("%s\n" % self.format_usage().strip())
+        sys.exit(2)
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--roots", default=None,
+                        help="技能根目录路径列表（POSIX 用 ':' 分隔），优先级最高")
+    common.add_argument("--config", default=None,
+                        help="技能根目录配置文件（JSON）")
+
+    matchopts = argparse.ArgumentParser(add_help=False)
+    matchopts.add_argument("--top", type=int, default=8, help="取前 N 条（默认 8）")
+    matchopts.add_argument("--type", default=None,
+                           help="只匹配某类：skill / mcp / agent")
+    matchopts.add_argument("--include-blocked", action="store_true",
+                           help="包含被策略屏蔽的远程条目")
+
+    p = ChineseParser(prog="discover.py", add_help=False,
+                      description="autopilot 能力发现 v0.9：按配置扫描技能目录并做任务匹配。",
+                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("-h", "--help", action="help", help="显示帮助")
+    sub = p.add_subparsers(dest="cmd", parser_class=ChineseParser)
+
+    s = sub.add_parser("scan", parents=[common, matchopts],
+                       help="扫描技能目录并建立索引")
+    s.add_argument("repo", nargs="?", default=None, help="目标仓库（默认当前目录）")
+    s.add_argument("--all-apps", action="store_true",
+                   help="同时扫描配置里的工具级根目录")
+    s.add_argument("--json", action="store_true", help="把索引 JSON 打到标准输出")
+
+    m = sub.add_parser("match", parents=[common, matchopts],
+                       help="按任务描述匹配技能 / MCP / 智能体")
+    m.add_argument("repo", help="目标仓库")
+    m.add_argument("query", help="任务描述")
+    m.add_argument("--json", action="store_true", help="结果以 JSON 输出")
+
+    st = sub.add_parser("stats", parents=[common], help="看索引统计")
+    st.add_argument("repo", nargs="?", default=None, help="目标仓库（默认当前目录）")
+    st.add_argument("--json", action="store_true", help="结果以 JSON 输出")
+    return p
 
 
 def main():
@@ -434,44 +717,28 @@ def main():
         print(__doc__)
         return 2
 
-    cmd = argv[0]
-    args = argv[1:]
-    opts = {"pos": [], "top": 8, "type": None, "json": False,
-            "all_apps": False, "include_blocked": False}
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--top" and i + 1 < len(args):
-            opts["top"] = int(args[i + 1]); i += 2; continue
-        if a.startswith("--top="):
-            opts["top"] = int(a.split("=", 1)[1])
-        elif a == "--type" and i + 1 < len(args):
-            opts["type"] = args[i + 1]; i += 2; continue
-        elif a.startswith("--type="):
-            opts["type"] = a.split("=", 1)[1]
-        elif a == "--json":
-            opts["json"] = True
-        elif a == "--all-apps":
-            opts["all_apps"] = True
-        elif a == "--include-blocked":
-            opts["include_blocked"] = True
-        elif not a.startswith("--"):
-            opts["pos"].append(a)
-        i += 1
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        print(__doc__)
+        return 2
 
-    repo = os.path.abspath(opts["pos"][0]) if opts["pos"] else os.getcwd()
+    repo = os.path.abspath(args.repo) if getattr(args, "repo", None) else os.getcwd()
+    opts = {
+        "roots": getattr(args, "roots", None),
+        "config": getattr(args, "config", None),
+        "all_apps": getattr(args, "all_apps", False),
+        "json": getattr(args, "json", False),
+    }
 
-    if cmd == "scan":
-        return cmd_scan(repo, opts["all_apps"])
-    if cmd == "stats":
+    if args.cmd == "scan":
+        return cmd_scan(repo, opts)
+    if args.cmd == "stats":
         return cmd_stats(repo)
-    if cmd == "match":
-        if len(opts["pos"]) < 2:
-            print('用法: discover.py match <repo> "<任务描述>" [--top 8] [--type skill]')
-            return 2
-        return cmd_match(repo, opts["pos"][1], top=opts["top"],
-                         kind=opts["type"], as_json=opts["json"],
-                         include_blocked=opts["include_blocked"])
+    if args.cmd == "match":
+        return cmd_match(repo, args.query, top=args.top, kind=args.type,
+                         as_json=args.json, include_blocked=args.include_blocked,
+                         opts=opts)
     print(__doc__)
     return 2
 

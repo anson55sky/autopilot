@@ -2,26 +2,86 @@
 """autopilot 接续包：给「新开一个会话接着跑」用的最小上下文（≤60 行）。
 
 用法:
-  resume.py <root> [--limit 5] [--json]
+  resume.py <root> [--json]
 
 任何新会话（人开的、监督者开的、崩溃后重开的）都先读这一份，
 不要读历史记录、不要读工人全文。
 """
 
+import datetime
 import json
 import os
+import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import inbox as inbox_mod  # noqa: E402
-import playbook as pb_mod  # noqa: E402
+try:
+    import inbox as inbox_mod  # noqa: E402
+except ImportError:  # 草稿包可能未带 inbox.py，降级为本地推导
+    inbox_mod = None
+try:
+    import playbook as pb_mod  # noqa: E402
+except ImportError:
+    pb_mod = None
+
+_PB_LINE = re.compile(
+    r"^- \[([a-z]+)\]\s*(.*?)(?:\s*\(x(\d+)(?:\s*·\s*(\d{4}-\d{2}-\d{2}))?\))?$")
+_GLOBAL_PLAYBOOK = str(Path.home() / ".autopilot" / "playbook.md")
+
+
+def _inbox_open_items(ap):
+    if inbox_mod is not None:
+        items = inbox_mod.current_items(inbox_mod.load_events(ap))
+        return [i for i in inbox_mod.sorted_items(items) if i["status"] == "open"]
+    events = []
+    try:
+        with open(os.path.join(ap, "inbox.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except (FileNotFoundError, OSError):
+        pass
+    items = {}
+    for e in events:
+        iid = e.get("id")
+        if not iid:
+            continue
+        if e.get("type") == "open":
+            items[iid] = dict(e, status="open")
+        elif e.get("type") in ("answer", "answered"):
+            if iid in items:
+                items[iid]["status"] = "answered"
+    return sorted((i for i in items.values() if i["status"] == "open"),
+                  key=lambda i: ts_key(i.get("ts", "")))
+
+
+def _playbook_read(path):
+    if pb_mod is not None:
+        return pb_mod.read_entries(path)
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = _PB_LINE.match(line.strip())
+                if m:
+                    out.append({"kind": m.group(1), "text": m.group(2),
+                                "count": int(m.group(3) or 1),
+                                "date": m.group(4) or "0000-00-00"})
+    except (FileNotFoundError, OSError):
+        pass
+    return out
 
 
 def load_json(path, default=None):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return default
 
 
@@ -36,9 +96,90 @@ def read_ledger(ap, limit=None):
                         events.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         pass
     return events[-limit:] if limit else events
+
+
+# 读到缺偏移的时间戳时记一条警告（0.9 起新写的戳一律 UTC，缺偏移只可能来自手改）。
+TS_WARNINGS = []
+
+
+def parse_ts(stamp):
+    """解析时间戳；无时区偏移按 UTC 解释并记警告；坏戳/空戳返回 None（不抛异常）。"""
+    if not isinstance(stamp, str) or not stamp.strip():
+        return None
+    txt = stamp.strip()
+    if txt.endswith(("Z", "z")):
+        txt = txt[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(txt)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+        note = "时间戳缺时区偏移，已按 UTC 解释: " + txt
+        if note not in TS_WARNINGS:
+            TS_WARNINGS.append(note)
+    return dt
+
+
+def ts_key(text):
+    """排序键：按绝对时刻排，不按字符串排（老戳本地偏移、新戳 UTC 时字符串序会错位）。"""
+    dt = parse_ts(text)
+    if dt is None:
+        return (1, text or "")
+    return (0, dt.timestamp())
+
+
+def fmt_ts(stamp):
+    """时间戳 → 显示串；坏戳/空戳显示 unknown。"""
+    dt = parse_ts(stamp)
+    if dt is None:
+        return "unknown"
+    try:
+        now = datetime.datetime.now(dt.tzinfo)
+        mins = int((now - dt).total_seconds() // 60)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return dt.strftime("%Y-%m-%d %H:%M") + "（耗时 unknown）"
+    return f"{dt.strftime('%Y-%m-%d %H:%M')} · 距今 {max(mins, 0)} 分钟"
+
+
+def read_last_line(path):
+    try:
+        last = ""
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if line.strip():
+                    last = line.strip()
+        return last
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def read_gate(root):
+    """flex 闸门状态：不自己算上限，上限一律引用 flexgate.py status。"""
+    st = load_json(os.path.join(root, "sandbox", ".gate", "state.json"))
+    if not isinstance(st, dict):
+        return {"active": [], "text": "无记录（sandbox/.gate/state.json 未探测）"}
+    try:
+        light = int(st.get("light_used", 0) or 0)
+        heavy = int(st.get("heavy_used", 0) or 0)
+        flex = int(st.get("flex_calls", 0) or 0)
+    except (TypeError, ValueError):
+        return {"active": [], "text": "坏记录（state.json 字段不可解析）"}
+    active = []
+    for p in st.get("permits", []) or []:
+        if isinstance(p, dict) and not p.get("used") and not p.get("revoked"):
+            active.append(str(p.get("permit_id") or p.get("id") or "?"))
+    return {
+        "active": active,
+        "light_used": light, "heavy_used": heavy, "flex_calls": flex,
+        "text": (f"light {light} · heavy {heavy} · flex_calls {flex}"
+                 f" · 活跃令牌 {' '.join(active) if active else '无'}"
+                 f"（上限与配额见 flexgate.py status）"),
+    }
 
 
 def gather(root):
@@ -59,19 +200,49 @@ def gather(root):
     doing = [t.get("id") for t in tasks if t.get("status") == "doing"]
     blocked = [t.get("id") for t in tasks if t.get("status") in ("blocked", "paused")]
 
-    items = inbox_mod.current_items(inbox_mod.load_events(ap))
-    open_items = [i for i in inbox_mod.sorted_items(items) if i["status"] == "open"]
+    items = _inbox_open_items(ap)
+    open_items = [i for i in items if i["status"] == "open"]
 
     memories = []
-    memories += pb_mod.read_entries(os.path.join(ap, "playbook.md"))
-    memories += pb_mod.read_entries(pb_mod.GLOBAL_PATH)
+    memories += _playbook_read(os.path.join(ap, "playbook.md"))
+    memories += _playbook_read(_GLOBAL_PLAYBOOK)
     memories.sort(key=lambda e: (e["date"], e["count"]), reverse=True)
+
+    # SKIP：未判定项（缺字段容错）
+    skipped = result.get("skipped") if isinstance(result, dict) else None
+    try:
+        skipped = int(skipped) if skipped is not None else None
+    except (TypeError, ValueError):
+        skipped = None
+
+    # host 形态探测
+    host_doc = load_json(os.path.join(ap, "host.json"))
+    if host_doc is None:
+        host_text = "未探测（跑 init.sh）"
+    elif not isinstance(host_doc, dict) or "intercept_permission" not in host_doc:
+        host_text = "降级形态：审批拦截不可用，依赖脚本级预检"
+    else:
+        host_text = f"intercept_permission={host_doc.get('intercept_permission')}"
+
+    # 时间：state 或最后一轮事件的 started_at（tz 兜底在 fmt_ts）
+    stamp = state.get("started_at")
+    if not stamp and rounds:
+        stamp = rounds[-1].get("started_at")
+
+    epoch = tasks_doc.get("epoch") if isinstance(tasks_doc, dict) else None
+    try:
+        epoch = int(epoch) if epoch is not None else 0
+    except (TypeError, ValueError):
+        epoch = 0
+    changelog_last = read_last_line(os.path.join(ap, "contract-changelog.md"))
 
     return {
         "root": root, "ap": ap, "state": state, "budget": budget,
         "tasks": tasks, "done": len(done_ids), "ready": ready, "doing": doing,
         "blocked": blocked, "result": result, "rounds": rounds, "calls": calls,
         "open_inbox": open_items, "memories": memories,
+        "gate": read_gate(root), "epoch": epoch, "changelog_last": changelog_last,
+        "skipped": skipped, "host_text": host_text, "started_at": stamp,
     }
 
 
@@ -102,12 +273,11 @@ def render(g):
     ids = []
     try:
         with open(os.path.join(g["ap"], "GOAL.md"), encoding="utf-8") as f:
-            import re
             for line in f:
                 m = re.match(r"^\|\s*(A\d+)\s*\|", line)
                 if m and m.group(1) not in ids:
                     ids.append(m.group(1))
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         pass
 
     passed = g["result"].get("passed", [])
@@ -122,6 +292,9 @@ def render(g):
     out.append(f"模式:   {state.get('mode', 'auto')}   阶段: {state.get('phase', 'intake')}")
     out.append(f"预算:   轮 {state.get('rounds_used', 0)}/{budget.get('max_rounds') or '-'}"
                f" · 调用 {g['calls']}/{budget.get('max_calls') or '-'}")
+    out.append(f"时间:   {fmt_ts(g['started_at'])}")
+    for w in TS_WARNINGS:
+        out.append(f"警告:   {w}")
     if ids:
         out.append(f"验收:   {len(passed)}/{len(ids)} 通过"
                    + (f"   未过: {' '.join(failed)}" if failed else "")
@@ -141,6 +314,11 @@ def render(g):
                    + (f" · blocked {' '.join(g['blocked'])}" if g["blocked"] else ""))
     else:
         out.append("任务:   未拆解")
+    out.append(f"Epoch:  {g['epoch']} · 契约变更: {g['changelog_last'] or '无'}")
+    out.append(f"闸门:   {g['gate']['text']}")
+    if g["skipped"]:
+        out.append(f"跳过:   {g['skipped']} 条未判定项，不得宣称全绿")
+    out.append(f"宿主:   {g['host_text']}")
     out.append(f"停止:   {'触发 → ' + '、'.join(stops) if stops else '未触发'}"
                f"   零进展 {state.get('no_progress_streak', 0)}/2")
 
@@ -193,7 +371,10 @@ def main():
     g = gather(root)
     if as_json:
         print(json.dumps({"state": g["state"], "ready": g["ready"],
-                          "open_inbox": g["open_inbox"], "memories": g["memories"]},
+                          "open_inbox": g["open_inbox"], "memories": g["memories"],
+                          "gate": g["gate"], "epoch": g["epoch"],
+                          "skipped": g["skipped"], "host": g["host_text"],
+                          "started_at": g["started_at"]},
                          ensure_ascii=False, indent=2))
         return 0
     print(render(g))

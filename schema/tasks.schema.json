@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autopilot.local/schema/tasks.schema.json",
+  "title": "autopilot task DAG",
+  "description": "tasks.json 的契约。相对路径强制、mode 与 flex 字段可选，缺省行为等价基线。禁止绝对路径、~ 前缀、盘符前缀与 .. 越界。",
+  "type": "object",
+  "required": ["tasks"],
+  "additionalProperties": false,
+  "properties": {
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/task" }
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "契约版本。GOAL/SPEC/验收矩阵每次生效变更 +1；跨 epoch 的 pass 不并入当轮结论。"
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "可选的契约元数据，用于 REPORT 引用。",
+      "properties": {
+        "goal": { "type": "string" },
+        "checks_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "mode_default": { "enum": ["strict", "hybrid", "explore-first"], "default": "strict" },
+        "flex_rules_snapshot": { "type": "object" }
+      }
+    }
+  },
+  "$defs": {
+    "relpath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!~)(?![A-Za-z]:[\\\\/])(?![.]{2}[\\\\/])(?!.*(^|/)[.][.](/|$)).+$",
+      "description": "项目相对路径。禁止 / 开头、~ 开头、盘符、以及任何 .. 段。"
+    },
+    "acceptanceId": {
+      "type": "string",
+      "pattern": "^A[0-9]+$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^T-[0-9]{2,}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "role", "status", "deps", "write_set", "acceptance", "card"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/taskId" },
+        "title": { "type": "string", "minLength": 1 },
+        "role": {
+          "enum": ["Builder", "Verifier", "Planner", "Triage", "Explorer"],
+          "description": "Explorer 为新增角色（A6 探索评审），只允许写 sandbox，且不得输出主验收词汇。"
+        },
+        "status": {
+          "enum": ["pending", "doing", "blocked", "done", "failed", "superseded"],
+          "description": "superseded 为新增：因契约变更而失效的历史任务。"
+        },
+        "deps": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/taskId" }
+        },
+        "write_set": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relpath" },
+          "description": "strict 轨道缺省一卡一文件；多文件仅在持有 batch 令牌时合法（见 flex_permit）。"
+        },
+        "acceptance": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/acceptanceId" },
+          "description": "本卡负责证明的验收项。flex 卡此项必须为空数组或仅作建议（不得计入主矩阵）。"
+        },
+        "card": { "$ref": "#/$defs/relpath" },
+        "result": { "$ref": "#/$defs/relpath" },
+        "origin": { "type": "string" },
+        "verification": { "type": "string" },
+        "mode": {
+          "enum": ["strict", "flex-light", "flex-heavy"],
+          "default": "strict",
+          "description": "调度轨道。缺省 strict → 未升级项目零改动即兼容。"
+        },
+        "sandbox_target": {
+          "type": "string",
+          "pattern": "^sandbox/",
+          "description": "flex 卡唯一可写根，必须以 sandbox/ 开头。strict 卡禁止出现此字段。"
+        },
+        "flex_permit": {
+          "type": "object",
+          "required": ["permit_id", "granted_by", "issued_round", "expires_round", "scope", "write_set_sha256"],
+          "additionalProperties": false,
+          "description": "批量写令牌（A7）。全局同时只允许 1 枚；生命周期由 flex-gate.sh 记账与回收。",
+          "properties": {
+            "permit_id": { "type": "string", "pattern": "^P-[0-9]{2,}$" },
+            "granted_by": { "enum": ["supervisor", "flex-gate"] },
+            "issued_round": { "type": "integer", "minimum": 1 },
+            "expires_round": { "type": "integer", "minimum": 1 },
+            "scope": { "enum": ["single-write", "sandbox-tree"] },
+            "write_set_sha256": { "$ref": "#/$defs/sha256" },
+            "reason": { "type": "string", "minLength": 20, "description": "为什么原子不可拆；空话视为无效申请。" },
+            "used": { "type": "boolean", "default": false },
+            "revoked": { "type": "boolean", "default": false }
+          }
+        },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "该卡被返工/重试过几次（status.py 用它推返工率）。缺省视为 0 次。"
+        },
+        "requires_env": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["browser", "audio-output", "network", "container", "gui", "docker", "device", "paid-api"] },
+          "description": "环境能力依赖。缺项时相关 A# 输出 SKIP（不计 PASS/FAIL），并计入 REPORT 环境声明。"
+        },
+        "superseded_by": { "$ref": "#/$defs/taskId" },
+        "proposal_ref": {
+          "$ref": "#/$defs/relpath",
+          "description": "flex-heavy 提案簿条目（B2），run 内不生效。"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "strict" } }, "required": ["mode"] },
+          "then": {
+            "properties": {
+              "write_set": { "maxItems": 1 },
+              "sandbox_target": false
+            },
+            "required": ["acceptance"],
+            "description": "strict：一卡一文件、必须绑定验收项、不得指向 sandbox。持有有效 batch 令牌时由 gate 在校验阶段放宽 maxItems。"
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "enum": ["flex-light", "flex-heavy"] } }, "required": ["mode"] },
+          "then": {
+            "required": ["sandbox_target"],
+            "properties": {
+              "write_set": {
+                "maxItems": 1,
+                "items": { "pattern": "^sandbox/" }
+              },
+              "acceptance": { "maxItems": 0 }
+            },
+            "description": "flex：写集必须落在 sandbox/，且不得声明主验收项（防探索结论冒充验收）。多卡并行 fan-out 用多张卡表达。"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,94 @@
+# autopilot 0.9.x — 依赖声明（dependency declaration）
+# =============================================================================
+# 本文件不含任何可安装包：`pip install -r requirements.txt` 是合法操作，
+# 结果是**一个包也不装**。这是有意的事实陈述，不是遗漏。
+#
+#   packages required : 0
+#   packages bundled  : 0
+#   third-party APIs  : 0（远程能力检索是可选功能，默认关闭，见下方 HOST CAPABILITY）
+#
+# 除注释行（以 # 开头）外本文件不得出现任何非空行；
+# 任何非注释行都会被安装器当作包名解析，那将违反"零第三方依赖"的设计裁决。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. 运行环境（RUNTIME）—— 全部为"必须"，缺失即无法开工
+# -----------------------------------------------------------------------------
+# requires: posix-sh          POSIX 兼容 shell（sh -c 可用；见下方 NOTE-SHELL 的当前偏差）
+# requires: python3 >= 3.9    仅用标准库（json / re / os / sys / datetime / hashlib / argparse 等）
+# requires: tar, gzip         分发与快照压缩（打包、baseline 归档）
+# requires: hash-tool         以下三者任一即可：shasum -a 256 / sha256sum / python3 hashlib
+#                             选择由运行时探测，或写进 {REPO_ROOT}/.autopilot/env.json
+# requires: find, sort, wc    POSIX 文件与文本工具（find 的行为差异见 dist/cross-platform.md）
+# requires: git               可选但强烈建议：baseline 快照与并行 worktree 隔离依赖它。
+#                             无 git 时控制器一律串行，仍可跑，只是失去并行与快照对比。
+#
+# NOTE-SHELL: 0.9 已把 init.sh / check.sh / round_prompt.sh 降到 POSIX sh（shebang 为 #!/bin/sh，
+#   不用 pipefail 与 bash 参数展开）。**唯一仍需 bash 的是 scripts/notify.sh**（可选通知脚本，
+#   缺失不影响运行）。只有 dash/ksh 的环境可跑主流程。
+# NOTE-PYTHON: python3 不可用 `python` 代替；版本 < 3.9 未验证（字典有序与 f-string 之外的
+#   语法依赖较少，但未在 3.8 上跑过，故不作承诺）。
+# NOTE-HASH: 只用 shasum 会导致精简 Linux 镜像直接失败（scripts/check.sh:26 / :29 / :47）。
+#   多实现探测与 MANIFEST 文本格式统一方案见 specs/portability.md，验证项 M7。
+# NOTE-EOL: 分发包必须 LF。仓库根有 .gitattributes（* text=auto eol=lf）；
+#   元验收 M6 会扫 CRLF，命中即判失败 —— 从 Windows 侧编辑过的文件会带 \r，
+#   让 check.sh 的 RESULT 正则与 shell 执行双双出错（P10）。
+
+# -----------------------------------------------------------------------------
+# 2. 宿主能力（HOST CAPABILITY）—— 5 原语，全部"可选"，附缺失后果
+# -----------------------------------------------------------------------------
+# 控制器只通过 5 个原语与宿主交互；接口定义见 specs/host-adapter.md。
+# 除"执行本地命令 + 读写文件"外，其余原语缺失都不会阻止运行，只会降级。
+#
+# required-absolute: run-local-commands     宿主必须能执行本地命令
+#   缺失后果：无法产出验收 RESULT 行 → 判定不存在 → 本 skill 不可用（不是降级，是不适用）。
+# required-absolute: read-write-files       宿主必须能读写 {REPO_ROOT} 下的文件
+#   缺失后果：状态无法落盘 → 无法续跑，同上不可用。
+#
+# optional: spawn_session        开一个全新上下文的轮次执行器
+#   缺失后果：降级为"同一会话内顺序推进多轮 + 每轮强制落盘 + 每轮开头只读接续包"（裁决 D2）。
+#   上下文腐化防护由"一轮一会话"退为"一轮一落盘"，长跑可靠性下降，必须在 REPORT 标注降级。
+# optional: await_turn           观察执行器状态
+#   缺失后果：只能靠执行器自行落盘 + 人工查看；轮次是否完成需在收轮时用检查结果核对。
+# optional: ask_human            人工触点
+#   缺失后果：超时即按"拒绝"处理，不阻塞（这是铁律，不是妥协）。不可逆动作转入待批收件箱等人读日志。
+# optional: intercept_permission 拦截高危动作请求
+#   缺失后果：**必须**由脚本层预检替代（flex-gate 的 deny-list，退出码 24）；
+#   REPORT 的环境声明必须写明该原语 absent（元验收 M11）。
+# optional: kill_session         硬停跑飞的执行器
+#   缺失后果：只能等其自然结束；REPORT 需标注"无硬停能力"，预算应留更多余量。
+# optional: parallel-workers     一条消息内并行派发多个工人
+#   缺失后果：串行执行。「谁写谁不验」只能靠强制换提示词 + 独立黑盒证据部分达成 → 标注为降级项。
+#
+# optional: network                远程技能检索（remote.py）与通知（notify.sh）
+#   缺失后果：远程能力检索不可用，仅本机能力索引照常；通知默认关闭，留空即无出口流量。
+# optional: browser                需要截图/页面断言的验收项
+#   缺失后果：相关 A# 输出 `RESULT <A#> SKIP <原因>`，不计 PASS 也不计 FAIL；
+#   "全绿"不成立，status.py 报"停止: 触发 → 可判定证据不足"（元验收 M5）。
+# optional: display-gui            依赖图形界面的验收项
+#   缺失后果：同上走 SKIP；不要在无显示环境伪造通过，也不要把它写成 FAIL 硬失败。
+# optional: container              隔离运行验收
+#   缺失后果：记录在 .autopilot/environment.json 的 container=null，相关验收项 SKIP。
+
+# -----------------------------------------------------------------------------
+# 3. 配置注入（CONFIG INJECTION）—— 不是依赖，是运行前需要落盘的东西
+# -----------------------------------------------------------------------------
+# env-file:    {REPO_ROOT}/.autopilot/env.json        init.sh 生成（skill 根、宿主名、哈希实现、python、shell）
+# env-file:    {REPO_ROOT}/.autopilot/host.json       宿主类型 + 支持的原语矩阵 + 是否可并行
+# env-file:    {REPO_ROOT}/.autopilot/environment.json   每次运行探测出的能力清单（验收用，不在 checks/ 故不进 MANIFEST）
+# dotenv-file: dist/.env.example → 复制为你的环境变量（全部可留空，留空即关闭或走默认探测）
+#
+# 说明：以上文件都是"环境产物"，不属于判定标准；
+# MANIFEST.sha256 只覆盖 checks/ 下的判定脚本，换机后 verify 仍应一致（M7）。
+
+# -----------------------------------------------------------------------------
+# 4. 平台承诺（PLATFORM SUPPORT）
+# -----------------------------------------------------------------------------
+# supported: macOS        承诺路径
+# supported: linux        承诺路径（需满足第 1 节；哈希实现缺失时走 python3 hashlib）
+# supported: wsl          承诺路径（视为 Linux，但注意 /tmp 与浏览器可执行文件位置差异）
+# unsupported: windows-native   原生 PowerShell / cmd **不承诺**：未验证，且 POSIX sh 与哈希工具存在差异。
+#                               详见 dist/cross-platform.md 末节"我们没测过就不要声称能用"。
+# unverified: alpine / busybox 工具链子集
+# unverified: 无 bash（仅 dash）环境
+# unverified: 无 python3 环境

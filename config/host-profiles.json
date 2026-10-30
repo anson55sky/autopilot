@@ -1,0 +1,20 @@
+{
+  "_comment": "宿主适配器能力矩阵。键 = 适配器名，值 = 该宿主提供的 5 原语（见 specs/host-adapter.md §1）。init.sh 按 --host / AUTOPILOT_HOST 查这张表；查不到就按最保守降级（无原语）并在 host.json 里标 assumed=true。适配器名是数据不是代码：接新后端只加一行，不改脚本。",
+  "profiles": {
+    "generic-cli": [],
+    "qoder": [
+      "spawn_session",
+      "await_turn",
+      "ask_human",
+      "intercept_permission",
+      "kill_session"
+    ],
+    "claude-code": [
+      "spawn_session",
+      "await_turn",
+      "ask_human",
+      "intercept_permission",
+      "kill_session"
+    ]
+  }
+}

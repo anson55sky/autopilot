@@ -1,0 +1,16 @@
+{
+  "_comment": "技能根目录配置示例（复制成 skill-roots.json 后按本机实际路径修改）。根目录优先级（高→低）：1) 命令行 --roots；2) 环境变量 AUTOPILOT_SKILL_ROOTS；3) 仓库内 .autopilot/env.json 的 skill_roots；4) 本文件的 roots；5) 内置默认（空列表，不猜任何应用目录）。路径列表分隔符：POSIX 用 ':'，Windows 用 ';'。roots 是「技能库根目录」，其下的技能目录里要有 SKILL.md。tool_roots 是按工具 id 分组的额外根目录，只有加 --all-apps 时才扫描。tool_subdirs 是「工具 id → 该工具在项目内的技能子目录（相对仓库根，可含多段）」，用于项目级技能扫描。",
+  "roots": [
+    "/opt/ai-skill-library",
+    "/srv/shared/skill-library"
+  ],
+  "tool_roots": {
+    "example-tool": [
+      "/opt/example-tool/skills"
+    ]
+  },
+  "tool_subdirs": {
+    "example-tool": "skills",
+    "another-example-tool": ".another-example-tool/skills"
+  }
+}
