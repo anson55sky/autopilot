@@ -76,7 +76,7 @@ codex-cli 0.147.0
 
 ## 授权 3：切换线上技能目录（改你正在用的 autopilot 本体）
 
-**状态：✅ 已关闭 —— 2026-10-30 23:4x 已切到线上，线上版本 `0.9.0-detour`。**
+**状态：✅ 已关闭 —— 2026-10-30 23:4x 已切到线上；2026-10-31 追加 F 组后线上版本 `0.9.1-detour`。**
 
 回滚命令（随时可用，一行）：
 
@@ -94,7 +94,7 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
 | --- | --- | --- |
 | 1 | 在技能目录 `git init` + 提交原样基线 + 打 `v0.8-baseline` tag | 前提动作，本身就是可回滚性的来源 |
 | 2 | 覆盖/新增 0.9 实现物（`SKILL.md`、`scripts/`、`schema/`、`specs/`、`templates/`、`tools/`、`meta-checks/`、`dist/`、`config/`、顶层文档） | 只覆盖与新增，**不删 0.8 任何文件**（切换后逐文件核对） |
-| 3 | 清理 `__pycache__`、改写 `scripts/` 残留引用 | 幂等 |
+| 3 | 清理 `__pycache__`、改写 `scripts/v09/` 残留引用 | 幂等 |
 | 4 | 跑一致性检查：xref 自洽 + 无 v09 残留 + `sh -n` + `py_compile` + 无 CRLF + 0.8 文件零丢失 | 只读 |
 | 5 | 提交并打 `v0.9-detour` tag | 可回滚 |
 | 6 | 打印回滚命令 | — |
@@ -176,3 +176,15 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
   - 教训：**"切换前全绿"不等于"切换后能用"**。分发包的自证能力必须在**切换后的形态**里验，
     否则它会安静地退化成"对着自己比较"。
 - 状态：授权 1、2、3 全部关闭。发布动作仍冻结（`git push` / 建仓需另行明确指示）。
+- 2026-10-31 **F 组落地：选择性吸收 ub-mode（编码工艺），版本 `0.9.1-detour`**。
+  裁决见 `00-DECISIONS.md` F 组；交互留档如下：
+  - **不整体合并**：ub-mode 是 2 文件 / 约 6 KB / 零脚本的行为清单，靠自觉、无强制、无状态；
+    三个门禁工具只覆盖 Clojure/Java/Go/TS/Rust/Python，**对 Swift / Objective-C 零覆盖**。
+  - **吸收四条无冲突的**：① 质量门禁做成 `GOAL.md` 可选区块（CRAP<10 / 重复<0.82 / 变异归零，
+    默认不启用，留空 = 等价基线）；② Triage 前提置疑规程（同前提连续两次失败 → 第三次不开工）；
+    ③ 三条反模式进表；④ `specs/craft.md` 收 22 条原则的中文重写版，声明非强制、不产生 A#。
+  - **明确压过上游一条**：ub-mode 的 "Commit often / Push to the main line at the end" 在
+    autopilot 工作区内**一律失效**（铁律 5 适用范围已写明），避免两个 skill 同时激活时指令矛盾。
+  - **许可提醒**：上游仓库没有 LICENSE 文件（默认版权保留），`specs/craft.md` 只借思想、未逐字复制。
+  - 验证：草稿仓与线上目录各跑一遍全量（xref / 10 个自测 / 元验收 / cmd_smoke / privacy / 迁移彩排），
+    结果见下方验证记录。

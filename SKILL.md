@@ -10,7 +10,7 @@ description: >-
   人类审美判断的任务。
 color: cyan
 emoji: 🛫
-version: 0.9.0-detour
+version: 0.9.1-detour
 ---
 
 # autopilot 0.9「detour」
@@ -27,7 +27,8 @@ version: 0.9.0-detour
 
 - 0.8 的全部铁律**原样继承**（见 §1–§10），一条没删。
 - 新增的是：受控弹性轨道（sandbox）、判定侧的诚实化（SKIP/epoch/提案簿）、跨机器与跨后端中立层、
-  引导澄清问卷。弹性只作用于**写与探索**，永不作用于**判定**。
+  引导澄清问卷、编码工艺参考。弹性只作用于**写与探索**，永不作用于**判定**；
+  工艺参考不产生任何 A#，只在被显式启用（质量门禁 / 前提置疑）时才生效。
 - 什么都不配置时，0.9 的行为与 0.8 **逐字节等价**（元验收 M1 保证）。
 
 ## 1. 铁律（任何轨道、任何令牌、任何审批都不可突破）
@@ -40,6 +41,8 @@ version: 0.9.0-detour
 5. **不可逆的事不自动做。** push、部署、发布、付费、发消息、删数据、改系统配置：不执行，写 inbox。
    双重拦截：宿主 `intercept_permission`（若可用）+ `{SKILL_ROOT}/scripts/flex-gate.sh deny-list`
    脚本级预检（退出码 24）。审批**不停等**，无关任务继续跑。
+   **本条覆盖外部技能**：任何外部编码/提交/发布类技能给出的 `commit` / `push` 指令，
+   在本工作区内一律失效（见 `{SKILL_ROOT}/specs/craft.md` §5.4）。
 6. **范围守卫。** 新发现只进 `BACKLOG.md`，不进本轮。
 7. **一轮一会话。** 状态全在磁盘，接续靠 `resume.py`，不回放历史对话。
 8. **判定不可被写者触碰（0.9 新增）。** flex 分支不得写主代码、`checks/`、`MANIFEST.sha256`、
@@ -60,8 +63,8 @@ version: 0.9.0-detour
 3. 探测技术栈与能力：`discover.py` 的 roots 按五级优先级取（`--roots` >
    `AUTOPILOT_SKILL_ROOTS` > `.autopilot/env.json` > 配置文件 > 空），
    未配置时明确报"未配置技能根目录"并列出配置入口，不静默假装空索引正常。
-4. 填 `GOAL.md`：交付物、验收矩阵（ID + 外部可观察检查 + 阈值）、非目标、边界、假设、预算、
-   `FLEX_RULES`（可整段留空）、环境能力假设、澄清记录。
+4. 填 `GOAL.md`：交付物、验收矩阵（ID + 外部可观察检查 + 阈值）、质量门禁（可留空）、
+   非目标、边界、假设、预算、`FLEX_RULES`（可整段留空）、环境能力假设、澄清记录。
 5. 写 `checks/run.sh`（黑盒判定 + 能力探测 + SKIP 语义），`check.sh freeze` 冻结。
 6. 写 `CHARTER.md`、`SPEC.md`、`DESIGN.md`、`tasks.json`（过 `schema/check.py`）与任务卡。
 7. 估预算：调用数 ≈ 任务数 × 1.5 + 轮数 × 2。超预算先砍范围，不砍验收。
@@ -84,6 +87,10 @@ version: 0.9.0-detour
 
 批量写令牌（A7）：白名单场景（共享 schema/迁移/重命名/原子簇），全局同时 1 枚，
 绑定 `(task, 写集 sha256, 轮次窗口, epoch)`，每 run ≤2 枚；**只放宽一卡一文件，不改变证据来源**。
+
+**Triage 前提置疑规程（0.9 叠加 / F3，默认不触发）**：同一前提连续两次修法都过不了同一条 A# 时，
+第三次修法不得开工；Triage 把前提写进 `BACKLOG.md` 的「置疑」条目，后续同前提的卡标 `blocked`，
+作为待决事项停机呈报。没有连续两次同前提失败时本规程零成本。详见 `{SKILL_ROOT}/specs/craft.md` §3。
 
 ## 4. 循环
 
@@ -113,6 +120,9 @@ while 未触发停止条件:
   方向不对称：add/tighten 可自动合并；relax/remove 必须逐条带人工确认标记。
 - **变异自检（推荐每个交付 run 做一次）**：删掉一块实现再跑全量，若仍全绿，说明该行为无人守，
   立即记 BACKLOG 并生成矩阵加强提案。本轮实践证明这比"全绿"本身更能发现风险。
+- **白盒质量门禁（可选，F2）**：CRAP / 结构重复 / 变异测试只在 `GOAL.md` 的「质量门禁」区块
+  启用时生效，且必须**先落成 A# 再 freeze**；工具缺失输出 SKIP 而非 FAIL。默认不启用 = 等价基线。
+  规则见 `specs/craft.md` §6。
 
 ## 6. 验证协议（查缺口）
 
@@ -193,6 +203,9 @@ python3 $SKILL/scripts/queue.py add --repo $REPO --goal "下一个目标"
 | 断言删掉被测实现仍全绿 | 假覆盖 | 变异自检 + 矩阵加强提案 |
 | SKIP 计入全绿 | 环境缺项被藏住 | B3/B4：SKIP 单列 + 环境声明 |
 | 把澄清问卷当逐岔口确认 | 退回人肉调度 | 一次批量、≤5 问、影响性过滤，运行期零提问 |
+| 用 500 行解决 50 行的问题 | 代码债当场形成，行为验收测不出 | 先减后加；实现量超任务卡描述量级两倍先停下来问方案 |
+| 同一前提修两次仍过不了同一关，还开第三次修 | 在错的前提上烧预算 | Triage 前提置疑规程：停机置疑，不再修 |
+| 先写实现、后补测试 | 测试向实现靠拢，判定失效 | 铁律 1：冻结验收先于实现；单元测试也先失败再通过 |
 
 ## 12. 适用边界
 
@@ -213,6 +226,7 @@ python3 $SKILL/scripts/queue.py add --repo $REPO --goal "下一个目标"
 | `specs/sandbox-layout.md` | sandbox 白名单、写权限矩阵、留痕指纹 |
 | `specs/portability.md` | 路径/哈希/roots/计时中立化改造清单 |
 | `specs/modes.md` | 三种运行模式与切换规则 |
+| `specs/craft.md` | 编码工艺参考（非强制，不产生 A#）：质量门禁规则、前提置疑规程、Git 写操作失效声明 |
 | `schema/tasks.schema.json` + `schema/check.py` | 任务 DAG 契约与校验器 |
 | `templates/` | GOAL（含 FLEX_RULES 与澄清记录）/ CHARTER / REPORT / TASK / INTAKE-QUESTIONS / checks 脚手架 |
 | `meta-checks/run.sh` | M1–M11 元验收（升级自身可证伪的回归网） |
