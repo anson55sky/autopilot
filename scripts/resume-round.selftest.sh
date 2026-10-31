@@ -138,6 +138,25 @@ else
   fail 10 "round_prompt.sh 退出非零：$(cat "$FIX/prompt2.err")"
 fi
 
+# ---------- R11 状态数字被手改坏：不崩，停止条件按 0 处理 ----------
+mkdir -p "$FIX/corrupt/.autopilot/checks"
+cat >"$FIX/corrupt/.autopilot/state.json" <<'EOF'
+{"goal":123,"rounds_used":"two","no_progress_streak":"x","budget":{"max_rounds":"many"}}
+EOF
+printf '[1,2]\n' >"$FIX/corrupt/.autopilot/tasks.json"
+printf '[1,2]\n' >"$FIX/corrupt/.autopilot/checks/last-result.json"
+if python3 "$RESUME" "$FIX/corrupt" >"$FIX/r11.out" 2>"$FIX/r11.err"; then
+  if grep -qE 'Traceback' "$FIX/r11.out" "$FIX/r11.err"; then
+    fail 11 "坏数字/异形 JSON 仍出 traceback"
+  elif grep -qF '目标:' "$FIX/r11.out"; then
+    pass 11
+  else
+    fail 11 "坏输入下没输出接续包"
+  fi
+else
+  fail 11 "坏数字导致 resume 非零退出：$(cat "$FIX/r11.err")"
+fi
+
 echo "----"
 if [ "$FAILS" -gt 0 ]; then echo "SELFTEST FAIL（$FAILS 例失败）"; exit 1; fi
 echo "SELFTEST PASS"

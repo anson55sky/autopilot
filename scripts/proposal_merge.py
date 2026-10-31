@@ -89,7 +89,7 @@ def read_json(p, default=None):
     try:
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return default
 
 

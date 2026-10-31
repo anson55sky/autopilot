@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""M9 close-round 幂等（含 flex 轮次，C4）：同一轮连收两次，轮次计数不变。
+"""M9 close-round 幂等 + 审计文件隔离：直接跑真实 scripts/status.py。
 
-这里把 close_round 逻辑固化成纯函数（真实 skill 里它落在 supervisor 侧），
-用合成 state.json 验证幂等：rounds_used 只在首次计入，flex_rounds_used 同理。
+历史版本用纯函数复刻 close-round，测不出生产者/消费者漂移（例如审计文件被当成轮次记录）。
+现在搭临时工作区调用真实脚本：连收两次幂等，且 r-NN.flex.json 不参与轮次发现。
 """
 import os
 import sys
@@ -10,54 +10,79 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
 
+STATUS = os.path.join(C.SCRIPTS, "status.py")
 
-def close_round(state, round_id, kind="strict"):
-    """幂等收轮：已收过则原样返回 (state, changed=False)。就地改 state 并返回 changed。"""
-    bucket = "closed_strict" if kind == "strict" else "closed_flex"
-    counter = "rounds_used" if kind == "strict" else "flex_rounds_used"
-    state.setdefault("closed_strict", [])
-    state.setdefault("closed_flex", [])
-    state.setdefault("rounds_used", 0)
-    state.setdefault("flex_rounds_used", 0)
-    if round_id in state[bucket]:
-        return state, False  # 已经收过，绝不重复计数
-    state[bucket].append(round_id)
-    state[counter] += 1
-    return state, True
+
+def close(tmp, path):
+    return C.sh([sys.executable, STATUS, "close-round", tmp, path])
 
 
 def main():
     tmp = C.new_tmp("m9-")
     try:
-        state = {"rounds_used": 2, "flex_rounds_used": 1,
-                 "closed_strict": [1, 2], "closed_flex": [1]}
-        C.write_json(os.path.join(tmp, "state.json"), state)
-        s = C.read_json(os.path.join(tmp, "state.json"))
+        ap = os.path.join(tmp, ".autopilot")
+        os.makedirs(os.path.join(ap, "rounds"), exist_ok=True)
+        os.makedirs(os.path.join(tmp, "sandbox", ".gate"), exist_ok=True)
+        C.write_json(os.path.join(ap, "state.json"), {
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "phase": "execute",
+            "rounds_used": 0,
+            "closed_rounds": [],
+            "no_progress_streak": 0,
+            "last_passed": [],
+            "budget": {"max_rounds": 10},
+        })
+        C.write_json(os.path.join(tmp, "sandbox", ".gate", "state.json"),
+                     {"light_used": 1, "heavy_used": 0, "flex_calls": 1})
 
-        before_r = s["rounds_used"]
-        _, ch1 = close_round(s, 3, "strict")
-        after_first = s["rounds_used"]
-        before_flex = s["flex_rounds_used"]
-        _, ch2 = close_round(s, 3, "flex")
-        after_flex_first = s["flex_rounds_used"]
+        r1 = os.path.join(ap, "rounds", "r-01.json")
+        C.write_json(r1, {"round": 1, "epoch": 0, "verdict": "pass",
+                          "passed": ["A1"], "failed": [], "tasks_closed": 1})
+        rc, out, err = close(tmp, r1)
+        if rc != 0:
+            return C.emit(9, "FAIL", f"真实 status.py 收第 1 轮失败 rc={rc}: {out}{err}")
 
-        # 连收第二次：同一 strict 轮 + 同一 flex 轮，计数必须不变
-        _, ch3 = close_round(s, 3, "strict")
-        _, ch4 = close_round(s, 3, "flex")
+        C.write_json(os.path.join(ap, "rounds", "r-01.flex.json"),
+                     {"round": 1, "epoch": 0, "flex_used": {"light": 1, "calls": 1}})
+        r2 = os.path.join(ap, "rounds", "r-02.json")
+        C.write_json(r2, {"round": 2, "epoch": 0, "verdict": "pass",
+                          "passed": ["A1"], "failed": [], "tasks_closed": 0})
+        rc, out, err = close(tmp, r2)
+        if rc != 0:
+            return C.emit(9, "FAIL", f"真实 status.py 收第 2 轮失败 rc={rc}: {out}{err}")
 
-        ok = (ch1 and not ch3 and not ch4 and ch2 and not ch4) \
-            and after_first == before_r + 1 \
-            and s["rounds_used"] == after_first \
-            and after_flex_first == before_flex + 1 \
-            and s["flex_rounds_used"] == after_flex_first \
-            and s["closed_strict"].count(3) == 1 \
-            and s["closed_flex"].count(3) == 1
-        if ok:
-            return C.emit(9, "PASS",
-                          f"重复收轮不多计：rounds_used {before_r}→{s['rounds_used']}，"
-                          f"flex_rounds_used {before_flex}→{s['flex_rounds_used']}")
-        return C.emit(9, "FAIL",
-                      f"幂等破坏 flags=({ch1},{ch2},{ch3},{ch4}) state={s}")
+        doc = C.read_json(r2) or {}
+        flex = doc.get("flex") or {}
+        cum = flex.get("cumulative") or {}
+        state = C.read_json(os.path.join(ap, "state.json")) or {}
+        metrics = C.read_json(os.path.join(ap, "rounds", "r-02.metrics.json")) or {}
+        need = ["round", "calls_used", "elapsed_minutes", "max_parallel",
+                "rework_rate", "flex_usage_rate"]
+        missing = [k for k in need if k not in metrics]
+        if missing:
+            return C.emit(9, "FAIL", f"r-02.metrics.json 缺字段 {missing}")
+        if flex.get("light") != 0 or cum.get("light_used") != 1:
+            return C.emit(9, "FAIL",
+                          f"r-01.flex.json 被当成轮次记录：light={flex.get('light')} "
+                          f"cumulative.light_used={cum.get('light_used')}")
+        if flex.get("usage_rate") is not None or "均为 0" not in (flex.get("usage_rate_basis") or ""):
+            return C.emit(9, "FAIL", "第 2 轮无调用无决策时占比应记为不适用")
+        if state.get("rounds_used") != 2:
+            return C.emit(9, "FAIL", f"rounds_used 记成 {state.get('rounds_used')}（应为 2）")
+
+        before = open(r2, encoding="utf-8").read()
+        rc, out, err = close(tmp, r2)
+        if rc != 0:
+            return C.emit(9, "FAIL", f"重复收轮失败 rc={rc}: {out}{err}")
+        after = open(r2, encoding="utf-8").read()
+        state = C.read_json(os.path.join(ap, "state.json")) or {}
+        if before != after or state.get("rounds_used") != 2:
+            return C.emit(9, "FAIL",
+                          f"重复收轮不幂等：文件变={before != after} "
+                          f"rounds_used={state.get('rounds_used')}")
+
+        return C.emit(9, "PASS",
+                      "真实 status.py 连收两次幂等；r-01.flex.json 不污染第 2 轮")
     finally:
         C.cleanup(tmp)
 

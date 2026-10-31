@@ -100,6 +100,28 @@ expect 0  "strict 多文件 + 有效令牌 → 放行"   g check --repo "$TMP" -
 expect 0  "回收令牌"                          g revoke --repo "$TMP" --permit-id P-01
 expect 23 "令牌回收后 strict 多文件重新被拒"  g check --repo "$TMP" --task T-04
 
+# 令牌必须绑定写集：发牌后改 write_set 不能继续放行
+expect 0 "发放写集不符的令牌" \
+  g permit --repo "$TMP" --task T-04 --files src/game.js --kind atomic --rounds 1 \
+    --reason "故意只绑定一个文件，验证检查时必须比对写集指纹"
+expect 23 "令牌写集与任务卡不符 → 拒绝"       g check --repo "$TMP" --task T-04
+expect 0  "回收写集不符令牌"                   g revoke --repo "$TMP" --permit-id P-02
+expect 2  "spend 负数次数 → 用法错误"          g spend --repo "$TMP" --task T-04 --reason "试图倒扣额度" --calls -5 --round 5
+
+# 状态数字被手改坏：闸门不得崩，按 0 处理
+TMP3=$(mktemp -d "${TMPDIR:-/tmp}/flexgate-corrupt-XXXXXX")
+mkdir -p "$TMP3/.autopilot"
+cat > "$TMP3/.autopilot/state.json" <<'EOF'
+{"rounds_used": "x", "no_progress_streak": "x", "budget": {"max_calls": "many"}}
+EOF
+cat > "$TMP3/.autopilot/tasks.json" <<'EOF'
+{"epoch": 0, "tasks": [
+  {"id": "T-F", "mode": "flex-light", "write_set": ["sandbox/draft/a.txt"]}
+]}
+EOF
+expect 0 "状态数字损坏时 flex 预检不崩"       g check --repo "$TMP3" --task T-F
+rm -rf "$TMP3"
+
 # 零进展连击 → flex 应被禁（连击数来自 state.json，闸门只读不猜）
 g spend --repo "$TMP" --task T-06 --reason "重置每轮计数以单独验证零进展规则" --calls 0 --round 5 --new-round >/dev/null
 # --new-round 必须先清零再记账：本轮第一次 spend 不能被自己吞掉（曾把 light_used 记成 0）
@@ -157,7 +179,19 @@ expect 0  "普通命令不误伤"          g deny-list --check "ls -la && node -
 
 g spend --repo "$TMP" --task T-07 --reason "把 flex_calls 打满以触发预算闸" --calls 20 --round 9 --new-round >/dev/null
 mkdir -p "$TMP/sandbox/hypo" && printf 'x\n' > "$TMP/sandbox/hypo/HYPOTHESIS_CHECK.md"
+mkdir -p "$TMP/sandbox/proposals"
+cat > "$TMP/sandbox/proposals/CHANGE_PROPOSAL-001.md" <<'EOF'
+proposal_id: CP-001
+status: draft（待批）
+EOF
+cat > "$TMP/sandbox/proposals/CHANGE_PROPOSAL-002.md" <<'EOF'
+---
+status: merged（epoch 0→1）
+---
+# CP-002
+EOF
 expect 21 "flex 预算超比例 → 拒绝"            g check --repo "$TMP" --task T-08 --round 9
+printf '{"broken": \n' >> "$TMP/sandbox/.gate/gate.jsonl"
 expect 0  "audit 生成 flex 审计"              g audit --repo "$TMP" --round 9
 
 # 审计文件必须存在且带 sandbox 树指纹 + 探索产物清单（hypo/proposals/artifacts 三键）
@@ -175,6 +209,23 @@ if grep -q '"gate_version": "autopilot 0\.9' "$TMP/.autopilot/rounds/r-09.flex.j
   idx=$((idx + 1)); printf 'RESULT S%s PASS gate_version 带 skill 版本号\n' "$idx"
 else
   idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL gate_version 不是 skill 版本号\n' "$idx"
+fi
+
+# 提案状态必须读文件头 status 字段，不能只看文件名
+if python3 - "$TMP/.autopilot/rounds/r-09.flex.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+st = d.get("proposal_state") or {}
+op = d.get("open_proposals") or []
+draft = "sandbox/proposals/CHANGE_PROPOSAL-001.md"
+merged = "sandbox/proposals/CHANGE_PROPOSAL-002.md"
+sys.exit(0 if st.get(draft) == "draft" and st.get(merged) == "merged"
+         and draft in op and merged not in op else 1)
+PY
+then
+  idx=$((idx + 1)); printf 'RESULT S%s PASS 提案 status 解析（draft 计积压、merged 不计）\n' "$idx"
+else
+  idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL 提案 status 未解析\n' "$idx"
 fi
 
 # 配置收紧生效、放宽被忽略

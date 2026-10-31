@@ -235,3 +235,41 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
     `light/decisions` 增量为 0、累计 `light_used` 仍为 1；修复前该例 FAIL、修复后 8/8。
   - **重算**：WavePeek `r-02` 按修复后的口径重收，`light=0`、`decisions=0`，占比退化为
     `null`（本轮既无调用也无决策），与真实情况一致；r-01 指标不受影响。
+- 2026-10-31 **完成测试收口（F-6…F-14），版本 `0.9.5-detour`**。用户指令是「未完成的全部完成 +
+  全面查 BUG + 做完成测试」，本轮把控制器自身当成被测系统做了一轮对抗验证。
+  - **F-6 合同变更轮误计零进展。** 合并提案的轮次 `tasks_closed=0`、无新增 PASS，会累计
+    `no_progress_streak`，后续维护轮可能误触「零进展」停止。现在以上一轮记录 epoch 提升判定
+    合同变更并计为进展；`status.selftest.sh` 第 9 例先红后绿。
+  - **F-7 M9 是合成复刻。** 旧 `m9.py` 用纯函数模拟 close-round，测不出生产者/消费者漂移
+    （F-3/F-5 都属这一类）。现在搭临时工作区直接调用真实 `status.py`：连收两次幂等，
+    且 `r-01.flex.json` 不污染第 2 轮；反向补丁可稳定变红。
+  - **F-8 并发行/返工率恒为 null。** `rework_rate` 回落到「同一任务重复派发」口径，
+    `max_parallel` 认轮次文档 `parallel_peak`（SKILL.md、SPEC、round_prompt 同步写入）。
+    `status.selftest.sh` 第 10 例钉死 `max_parallel=2`、`rework_rate=0.25`。
+  - **F-9 审计不读提案状态。** `flex-gate.sh audit` 现在解析文件头 `status:`，输出
+    `proposal_status` / `proposal_state` / `open_proposals`；WavePeek 审计实测能列出未结 CP-002。
+  - **F-10 脚本健壮性批量修复（约 20 处）。** `queue.py`（缺 `--repo` 静默用 cwd、非 UTF-8 崩溃、
+    前缀歧义）、`remote.py`（非法 `--limit`、https→http / 内网重定向、目录逃逸、非原子写）、
+    `discover.py`（索引损坏崩溃、`stats --json` 被静默忽略）、`inbox.py` / `status.py` /
+    `resume.py` / `flexgate.py`（单行坏 UTF-8 吞掉后续事件）、`environ.py` / `migrate_tasks.py` /
+    `proposal_merge.py` / `playbook.py`（坏 JSON / 非法 `--limit` 吐栈）。坏行现在跳过，
+    坏行之后的合法事件仍可见；索引与 registry 改原子写。收口另修：`remote.py add` 对已存在
+    同名目录（registry 无记录也算）改用 `-2` 后缀，不再覆写手工放置的条目；`queue.py` 改
+    临时文件 + `os.replace` 原子写；`inbox.py` 的事件/账本改单次 `O_APPEND` + `fsync`，
+    `inbox.md` 改原子替换。
+  - **F-11 切换器被历史替换误伤。** `tools/cutover.sh` 的 `scripts/v09/` 正向替换变成恒真
+    自替换，「无 v09 残留」检查永远失败；已回滚，草稿与线上逐字节一致。
+  - **F-12 文档命令签名不符。** SKILL.md 把 `deny-list --check` 写成开关，实现要求命令串作值；
+    已改为 `--check "git push"`。`cmd_smoke.sh` 增加规则：argparse 的 `error: argument/...`
+    一律 FAIL，不再当成可预期用法错误放过（这条规则正是为抓 F-12 而加）。
+  - **F-13 Python 3.13 弃用。** `re.split(..., 1)` 位置参数触发 DeprecationWarning，
+    改为 `maxsplit=1`；全部脚本在 `-W error::DeprecationWarning` 下编译无告警。
+  - **F-14 缺完成测试入口。** 新增 `tools/e2e-smoke.sh`：全新工作区 22 项端到端断言
+    （init → 契约 → freeze/verify/run → 冻结后篡改必被 MANIFEST 拦截 → 收轮幂等 →
+    summary/metrics/phase → resume/round_prompt → 闸门放行/拒绝/审计 → inbox/queue/playbook），
+    自我清理、无本机绝对路径，可随包分发。
+  - **完成测试结果**：技能自测 9 套全绿、元验收 11 PASS / 0 FAIL / 0 SKIP、xref 6/6、
+    隐私扫描 FAIL 0（PS3 SKIP：未提供词表）、命令冒烟 42/42、端到端 22/22；
+    WavePeek 冻结验收 8/8、MANIFEST 一致、对抗模糊 71/71。
+  - **WavePeek 侧**：CP-002 草稿（WavePeek 的 4 条新增验收，add）已放到规范目录 `sandbox/proposals/`，无批准时
+    `validate` 返回 31；未合并、epoch 仍为 1。`REPORT.md` / `BACKLOG.md` 已按完成测试结果更新。

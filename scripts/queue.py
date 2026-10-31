@@ -57,35 +57,59 @@ def write(path, meta, body):
         if meta.get(k) not in (None, ""):
             lines.append(f"{k}: {meta[k]}")
     lines.append("---")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n\n" + body.strip() + "\n")
+    data = "\n".join(lines) + "\n\n" + body.strip() + "\n"
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def items():
-    os.makedirs(QUEUE, exist_ok=True)
+    try:
+        os.makedirs(QUEUE, exist_ok=True)
+        names = sorted(os.listdir(QUEUE))
+    except OSError:
+        return []
     out = []
-    for name in sorted(os.listdir(QUEUE)):
+    for name in names:
         if name.endswith(".md"):
             try:
                 out.append(parse(os.path.join(QUEUE, name)))
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 pass
     return out
 
 
 def find(prefix):
-    for it in items():
-        if it["id"] == prefix or it["id"].startswith(prefix):
-            return it
-    return None
+    """返回 (条目, 错误)。前缀命中多条时拒绝执行，避免误操作别的目标。"""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        return None, "条目 id 不能为空"
+    rows = items()
+    for it in rows:
+        if it["id"] == prefix:
+            return it, None
+    hits = [it for it in rows if it["id"].startswith(prefix)]
+    if not hits:
+        return None, f"没有这个条目: {prefix}"
+    if len(hits) > 1:
+        return None, f"前缀 {prefix} 命中 {len(hits)} 个条目，请写完整 id"
+    return hits[0], None
 
 
 def cmd_add(opts):
     goal = (opts.get("goal") or "").strip()
-    repo = os.path.abspath(opts.get("repo") or "")
-    if not goal or not repo:
+    repo_arg = (opts.get("repo") or "").strip()
+    if not goal or not repo_arg:
         print('用法: queue.py add --repo <path> --goal "目标"')
         return 2
+    repo = os.path.abspath(repo_arg)
     if not os.path.isdir(repo):
         print(f"仓库不存在: {repo}")
         return 2
@@ -128,9 +152,9 @@ def cmd_next(as_json=False):
 
 
 def cmd_take(prefix):
-    it = find(prefix)
-    if not it:
-        print(f"没有这个条目: {prefix}")
+    it, err = find(prefix)
+    if err:
+        print(err)
         return 2
     if it["status"] != "queued":
         print(f"{it['id']} 当前状态是 {it['status']}，不能 take")
@@ -143,9 +167,9 @@ def cmd_take(prefix):
 
 
 def set_status(prefix, status):
-    it = find(prefix)
-    if not it:
-        print(f"没有这个条目: {prefix}")
+    it, err = find(prefix)
+    if err:
+        print(err)
         return 2
     it["status"] = status
     it["updated"] = now_iso()
@@ -155,9 +179,9 @@ def set_status(prefix, status):
 
 
 def cmd_show(prefix):
-    it = find(prefix)
-    if not it:
-        print(f"没有这个条目: {prefix}")
+    it, err = find(prefix)
+    if err:
+        print(err)
         return 2
     print(f"id:     {it['id']}")
     print(f"repo:   {it.get('repo', '')}")

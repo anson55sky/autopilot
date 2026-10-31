@@ -331,7 +331,7 @@ def main(argv=None):
     try:
         with open(tasks_path, encoding="utf-8") as f:
             doc = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         print("读不出 tasks.json: %s" % exc, file=sys.stderr)
         return 2
 

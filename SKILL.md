@@ -10,7 +10,7 @@ description: >-
   人类审美判断的任务。
 color: cyan
 emoji: 🛫
-version: 0.9.4-detour
+version: 0.9.5-detour
 ---
 
 # autopilot 0.9「detour」
@@ -130,7 +130,8 @@ while 未触发停止条件:
 验证者不许是实现者，提示词敌对：默认不合格，除非证据充分。
 跑冻结验收（MANIFEST 漂移即停）→ 逐条核对证据 → 对抗检查（空输入、超长、并发、异常路径、
 退出码、回归、硬编码探针值与时间步长作弊）→ 不改代码不改 checks →
-输出 `r-XX.json`（verdict/passed/failed/tasks_closed/evidence/blind_spots）。
+输出 `r-XX.json`（verdict/passed/failed/tasks_closed/evidence/blind_spots；
+有并行派发时补 `parallel_peak` = 本轮同时运行的工人峰值，供轮次指标使用）。
 
 缺口四问：哪条 A 没被证明？有没有"过了但没查"？影响了 A 之外的什么？新增 TODO/吞异常/硬编码算不算缺口？
 加第五问（0.9）：**有没有一条断言，把它的被测实现删掉后依然全绿？**
@@ -174,13 +175,14 @@ sh $SKILL/scripts/flex-gate.sh check --repo $REPO --task T-01
 sh $SKILL/scripts/flex-gate.sh permit --repo $REPO --task T-04 \
    --files a,b --kind schema --rounds 1 --reason "为什么原子不可拆（≥20 字）"
 sh $SKILL/scripts/flex-gate.sh audit --repo $REPO --round N
-sh $SKILL/scripts/flex-gate.sh deny-list --check --repo $REPO --cmd "git push"
+sh $SKILL/scripts/flex-gate.sh deny-list --repo $REPO --check "git push"
 python3 $SKILL/scripts/environ.py probe --repo $REPO
 python3 $SKILL/scripts/inbox.py list $REPO
 python3 $SKILL/scripts/proposal_merge.py merge --repo $REPO --proposal <path>
 python3 $SKILL/schema/check.py $REPO/.autopilot/tasks.json
 python3 $SKILL/scripts/migrate_tasks.py $REPO   # 仅老工作区需要：0.8 的 tasks.json → 0.9 契约
 python3 $SKILL/tools/xref.py $SKILL               # 文档承诺 vs 实现的一致性
+sh $SKILL/tools/e2e-smoke.sh                      # 完成测试：全新工作区端到端（22 项断言）
 bash $SKILL/scripts/round_prompt.sh $REPO [round]
 python3 $SKILL/scripts/remote.py search $REPO "关键词"   # 本地 top3 都不相关才远程搜
 python3 $SKILL/scripts/playbook.py add $REPO --kind pitfall --text "一句话结论"

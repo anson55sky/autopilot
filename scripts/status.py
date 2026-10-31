@@ -54,7 +54,7 @@ def load_json(path, default=None):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, IsADirectoryError, json.JSONDecodeError, OSError):
+    except (OSError, ValueError):
         return default
 
 
@@ -66,16 +66,18 @@ def dump_json(path, data):
 def read_jsonl(path):
     rows = []
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
-                    pass
-    except (FileNotFoundError, OSError):
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except (OSError, UnicodeDecodeError):
         pass
     return rows
 
@@ -322,6 +324,17 @@ def latest_record_before(ap, round_no):
     return best
 
 
+def contract_change(round_doc, prev_doc):
+    """合同 epoch 提升算进展；只认与上一轮记录的对比，不认轮次自报标记。"""
+    if not isinstance(prev_doc, dict):
+        return None
+    cur_epoch = to_int(round_doc.get("epoch"))
+    prev_epoch = to_int(prev_doc.get("epoch"))
+    if cur_epoch is None or prev_epoch is None or cur_epoch <= prev_epoch:
+        return None
+    return {"from": prev_epoch, "to": cur_epoch}
+
+
 # ---------------------------------------------------------------- 指标推导
 
 def round_start(ap, state, round_doc, round_no, events):
@@ -408,13 +421,36 @@ def max_parallelism(events, tasks, state, round_doc):
     return None, "轮次结果、state.json、账本、任务表里都没有并发度记录"
 
 
+def count_redispatch(events, start):
+    """同一任务在本轮窗口内被重复派发 = 返工；返回 (多出的派发次数, 参与任务数)。"""
+    by_task = {}
+    for e in events:
+        if e.get("type") != "worker":
+            continue
+        ts = parse_ts(e.get("ts"))
+        if start is not None and ts is not None and ts < start:
+            continue
+        key = e.get("task") or e.get("card") or e.get("id")
+        if not key:
+            continue
+        by_task[key] = by_task.get(key, 0) + 1
+    extra = sum(n - 1 for n in by_task.values() if n > 1)
+    return extra, len(by_task)
+
+
 def rework_rate(events, tasks, start, calls):
-    """返工率：优先用账本里的 rework/retry 事件，其次用任务表的 attempts。"""
+    """返工率：优先用账本里的 rework/retry 事件，其次看同一任务重复派发，最后用 attempts。"""
     rework = count_rework(events, start)
     if rework:
         if calls:
             return rework / calls, "账本里 rework/retry 事件 %d 条 ÷ 本轮调用 %d 次" % (rework, calls)
         return None, "发现 %d 条 rework/retry 事件，但本轮调用数未知，比率算不出" % rework
+    redispatch, workers = count_redispatch(events, start)
+    if redispatch:
+        if calls:
+            return redispatch / calls, ("账本里 %d 个任务重复派发、多出 %d 次 ÷ 本轮调用 %d 次"
+                                        % (workers, redispatch, calls))
+        return None, "发现同一任务重复派发 %d 次，但本轮调用数未知，比率算不出" % redispatch
     attempts = 0
     with_attempts = 0
     for task in tasks:
@@ -514,7 +550,9 @@ def cmd_summary(root):
     if max_calls and calls >= max_calls:
         stops.append("调用预算耗尽")
 
-    goal_line = (state.get("goal") or "").strip().splitlines()
+    goal = state.get("goal")
+    goal_text = goal if isinstance(goal, str) else ("" if goal is None else str(goal))
+    goal_line = goal_text.strip().splitlines()
     goal_line = goal_line[0] if goal_line else "(未记录)"
 
     gate = read_gate(root, ap)
@@ -636,6 +674,7 @@ def cmd_close_round(root, round_path):
         prev_flex = prev[1].get("flex")
         if isinstance(prev_flex, dict) and isinstance(prev_flex.get("cumulative"), dict):
             prev_cum = prev_flex["cumulative"]
+    epoch_bump = contract_change(round_doc, prev[1] if prev else None)
     light_delta = _delta(cur["light_used"], (prev_cum or {}).get("light_used"))
     heavy_delta = _delta(cur["heavy_used"], (prev_cum or {}).get("heavy_used"))
     flex_delta = _delta(cur["flex_calls"], (prev_cum or {}).get("flex_calls"))
@@ -677,6 +716,7 @@ def cmd_close_round(root, round_path):
         "detail": {
             "window_start": start_dt.astimezone(datetime.timezone.utc).isoformat(timespec="seconds") if start_dt else None,
             "window_start_source": start_reason,
+            "contract_change": epoch_bump,
             "flex_usage_rate_basis": rate_basis,
             "flex": {
                 "light": light_delta if light_delta is not None else dec_light_delta,
@@ -761,7 +801,7 @@ def cmd_close_round(root, round_path):
     passed = sorted(set(round_doc.get("passed", []) or []))
     prev_passed = set(state.get("last_passed", []) or [])
     tasks_closed = to_int(round_doc.get("tasks_closed"), 0) or 0
-    progressed = bool(set(passed) - prev_passed) or tasks_closed > 0
+    progressed = bool(set(passed) - prev_passed) or tasks_closed > 0 or epoch_bump is not None
 
     state["rounds_used"] = to_int(state.get("rounds_used"), 0) + 1
     state["no_progress_streak"] = 0 if progressed else to_int(state.get("no_progress_streak"), 0) + 1
@@ -790,6 +830,7 @@ def cmd_close_round(root, round_path):
         "failed": sorted(set(round_doc.get("failed", []) or [])),
         "tasks_closed": tasks_closed,
         "progress": progressed,
+        "contract_change": epoch_bump,
         "notes": round_doc.get("notes", ""),
         # 0.9 新增字段，不改旧字段含义
         "flex": flex_block,
@@ -799,9 +840,11 @@ def cmd_close_round(root, round_path):
         event["started_at"] = start_dt.astimezone(datetime.timezone.utc).isoformat(timespec="seconds")
     append_ledger(ap, event)
 
-    print("第 %d 轮已收：%s · 关闭 %d 个任务 · 零进展连击 %s/2"
+    print("第 %d 轮已收：%s · 关闭 %d 个任务%s · 零进展连击 %s/2"
           % (state["rounds_used"], "通过" if event["verdict"] == "pass" else "未通过",
-             tasks_closed, state["no_progress_streak"]))
+             tasks_closed,
+             (" · 合同 epoch %d→%d" % (epoch_bump["from"], epoch_bump["to"])) if epoch_bump else "",
+             state["no_progress_streak"]))
     print("闸门:   light %s · heavy %s · flex %s（调用 %s 次）"
           % (fmt_num(flex_block["light"]), fmt_num(flex_block["heavy"]),
              fmt_num(flex_block["flex"]), calls))

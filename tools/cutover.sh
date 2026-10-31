@@ -90,7 +90,7 @@ copy_file "AWAITING.md"     "AWAITING.md"
 copy_file ".gitignore"      ".gitignore"
 copy_file ".gitattributes"  ".gitattributes"
 
-# 3) 扁平化后修正引用：scripts/ → scripts/
+# 3) 扁平化后修正引用：scripts/v09/ → scripts/
 #    只用 python 改写：`sed -i` 在 BSD 与 GNU 上参数不同（BSD 要 `-i ''`），跨平台脚本不能依赖它。
 #    草稿已按最终扁平布局组织，正常情况下这里是空操作；保留它是为了兜住"还有文件留在 v09/"的情况。
 say "[3/6] 清理与引用改写（python，跨平台）"
@@ -109,8 +109,8 @@ for dp, dns, fns in os.walk(root):
             s = io.open(p, encoding="utf-8").read()
         except (OSError, UnicodeDecodeError):
             continue
-        if "scripts/" in s:
-            io.open(p, "w", encoding="utf-8").write(s.replace("scripts/", "scripts/"))
+        if "scripts/v09/" in s:
+            io.open(p, "w", encoding="utf-8").write(s.replace("scripts/v09/", "scripts/"))
             n += 1
 print("  改写 %d 个文件" % n)
 # 生成的缓存不进包
@@ -132,7 +132,7 @@ fi
 # 4) 切换后检查
 say "[4/6] 一致性检查"
 if [ "$apply" = 1 ]; then
-  leftover=$(grep -rn "scripts/" "$skill" --include='*.md' --include='*.sh' --include='*.py' --include='*.json' 2>/dev/null | grep -v '/\.git/' | wc -l | tr -d ' ')
+  leftover=$(grep -rn "scripts/v09/" "$skill" --include='*.md' --include='*.sh' --include='*.py' --include='*.json' 2>/dev/null | grep -v '/\.git/' | wc -l | tr -d ' ')
   [ "$leftover" = 0 ] && say "  [ok] 无 v09 残留引用" || say "  [FAIL] 仍有 $leftover 处 v09 引用"
   bad=0
   for s in "$skill"/scripts/*.sh; do

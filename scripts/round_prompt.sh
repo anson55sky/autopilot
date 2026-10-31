@@ -56,7 +56,7 @@ d. 续跑：只补剩余波次，已复核的不重做、不重派。
    配额与上限一律以 python3 {SKILL_ROOT}/scripts/flexgate.py status 的输出为准，不要自己心算。
 3. 收执 → 更新 tasks.json → 每个工人/每次验证都记一条 ledger（status.py log）。
 4. 冻结验收：跑 bash {SKILL_ROOT}/scripts/check.sh run {REPO_ROOT}。全量验收一轮只跑一次；出现 MANIFEST 漂移立即停。
-5. 独立验证者出 {REPO_ROOT}/.autopilot/rounds/r-$(printf '%02d' "$ROUND").json（不许自己验自己），必填：round/verdict/passed/failed/skipped/tasks_closed/evidence/blind_spots/notes。resume 若提示有未判定项（跳过 N>0），verdict 不得为 pass。
+5. 独立验证者出 {REPO_ROOT}/.autopilot/rounds/r-$(printf '%02d' "$ROUND").json（不许自己验自己），必填：round/verdict/passed/failed/skipped/tasks_closed/evidence/blind_spots/notes；有并行派发时补 parallel_peak（同时运行的工人峰值）。resume 若提示有未判定项（跳过 N>0），verdict 不得为 pass。
 6. python3 {SKILL_ROOT}/scripts/status.py close-round {REPO_ROOT} {REPO_ROOT}/.autopilot/rounds/r-$(printf '%02d' "$ROUND").json
 7. 复盘 1–3 条，写进记忆：python3 {SKILL_ROOT}/scripts/playbook.py add {REPO_ROOT} --kind pitfall|skill|check|command|rule --text "一句话结论"
 8. 结束。不要开下一轮，不要写 REPORT.md（除非 resume 显示已触发停止条件）。

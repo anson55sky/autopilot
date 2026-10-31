@@ -36,15 +36,17 @@ def _inbox_open_items(ap):
         return [i for i in inbox_mod.sorted_items(items) if i["status"] == "open"]
     events = []
     try:
-        with open(os.path.join(ap, "inbox.jsonl"), encoding="utf-8") as f:
+        with open(os.path.join(ap, "inbox.jsonl"), encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        events.append(json.loads(line))
+                        event = json.loads(line)
                     except json.JSONDecodeError:
-                        pass
-    except (FileNotFoundError, OSError):
+                        continue
+                    if isinstance(event, dict):
+                        events.append(event)
+    except (OSError, UnicodeDecodeError):
         pass
     items = {}
     for e in events:
@@ -81,22 +83,32 @@ def load_json(path, default=None):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (OSError, ValueError):
+        return default
+
+
+def as_int(value, default=0):
+    """状态文件被手改坏时也不崩：解析不了按默认值处理。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return default
 
 
 def read_ledger(ap, limit=None):
     events = []
     try:
-        with open(os.path.join(ap, "ledger.jsonl"), encoding="utf-8") as f:
+        with open(os.path.join(ap, "ledger.jsonl"), encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        events.append(json.loads(line))
+                        event = json.loads(line)
                     except json.JSONDecodeError:
-                        pass
-    except (FileNotFoundError, OSError):
+                        continue
+                    if isinstance(event, dict):
+                        events.append(event)
+    except (OSError, UnicodeDecodeError):
         pass
     return events[-limit:] if limit else events
 
@@ -185,10 +197,16 @@ def read_gate(root):
 def gather(root):
     ap = os.path.join(root, ".autopilot")
     state = load_json(os.path.join(ap, "state.json"), {})
+    if not isinstance(state, dict):
+        state = {}
     budget = state.get("budget", {}) or {}
+    if not isinstance(budget, dict):
+        budget = {}
     tasks_doc = load_json(os.path.join(ap, "tasks.json"), {"tasks": []})
     tasks = tasks_doc.get("tasks", []) if isinstance(tasks_doc, dict) else []
     result = load_json(os.path.join(ap, "checks", "last-result.json"), {})
+    if not isinstance(result, dict):
+        result = {}
     events = read_ledger(ap)
     rounds = [e for e in events if e.get("type") == "round"]
     calls = sum(1 for e in events if e.get("type") in ("worker", "verifier"))
@@ -260,9 +278,10 @@ def stop_reasons(g, ids):
     stops = []
     if verified_green:
         stops.append("验收全绿（已收轮）")
-    if int(s.get("no_progress_streak", 0)) >= 2:
+    if as_int(s.get("no_progress_streak", 0)) >= 2:
         stops.append("连续两轮零进展")
-    if budget.get("max_rounds") and int(s.get("rounds_used", 0)) >= int(budget["max_rounds"]):
+    max_rounds = as_int(budget.get("max_rounds"))
+    if max_rounds and as_int(s.get("rounds_used", 0)) >= max_rounds:
         stops.append("轮次预算耗尽")
     return stops
 
@@ -284,7 +303,9 @@ def render(g):
     failed = g["result"].get("failed", [])
     uncovered = [i for i in ids if i not in passed and i not in failed]
     stops = stop_reasons(g, ids)
-    goal = (state.get("goal") or "").strip().splitlines()
+    goal = state.get("goal")
+    goal_text = goal if isinstance(goal, str) else ("" if goal is None else str(goal))
+    goal = goal_text.strip().splitlines()
     goal = goal[0] if goal else "(未记录)"
 
     out = ["== 接续包 ==", f"仓库:   {g['root']}"]

@@ -90,23 +90,49 @@ def ts_key(text):
 def load_events(ap):
     events = []
     try:
-        with open(os.path.join(ap, "inbox.jsonl"), encoding="utf-8") as f:
+        with open(os.path.join(ap, "inbox.jsonl"), encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        events.append(json.loads(line))
+                        event = json.loads(line)
                     except json.JSONDecodeError:
-                        pass
-    except FileNotFoundError:
+                        continue
+                    if isinstance(event, dict):
+                        events.append(event)
+    except (OSError, UnicodeDecodeError):
         pass
     return events
 
 
+def append_line(path, line):
+    # 单次 O_APPEND 写 + fsync：崩溃时最多丢最后一条，不会把前面的合法行截断。
+    data = (line + "\n").encode("utf-8")
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_atomic(path, data):
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def append_event(ap, event):
     event.setdefault("ts", now_iso())
-    with open(os.path.join(ap, "inbox.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    append_line(os.path.join(ap, "inbox.jsonl"),
+                json.dumps(event, ensure_ascii=False))
 
 
 def auth_of(answered_by, ref):
@@ -202,9 +228,10 @@ def render_md(root, items):
             (" · " + i["task"]) if i.get("task") else ""))
         lines.append("")
         lines.append(i.get("question", ""))
-        if i.get("options"):
+        options = i.get("options")
+        if isinstance(options, list) and options:
             lines.append("")
-            for opt in i["options"]:
+            for opt in options:
                 mark = " **(推荐)**" if opt == i.get("recommend") else ""
                 lines.append("- `%s`%s" % (opt, mark))
         if i.get("cost"):
@@ -221,14 +248,13 @@ def render_md(root, items):
                 i["id"], i.get("question", ""), i.get("answer", ""), tag, ref,
                 i.get("answered_at", ""),
                 "" if tag != AUTH_LEGACY else " · 旧记录未认证，视为未批准"))
-    with open(os.path.join(ap, "inbox.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    write_atomic(os.path.join(ap, "inbox.md"), "\n".join(lines) + "\n")
 
 
 def ledger_append(ap, event):
     event.setdefault("ts", now_iso())
-    with open(os.path.join(ap, "ledger.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    append_line(os.path.join(ap, "ledger.jsonl"),
+                json.dumps(event, ensure_ascii=False))
 
 
 def parse_opts(args, spec):

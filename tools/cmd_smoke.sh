@@ -58,6 +58,12 @@ run_one() { # idx name cmd
     no "$idx" "$name" "python traceback：$(grep -m1 Traceback "$out")"
     return
   fi
+  # argparse 的参数错误说明文档命令与实现签名不符；它和"前置条件缺失导致的 exit 1/2"不同，
+  # 不能按可预期用法错误放过（实例：deny-list --check 被写成开关，实际要带值）。
+  if grep -qE "error: (argument|unrecognized arguments|the following arguments are required)" "$out"; then
+    no "$idx" "$name" "参数与实现不符：$(grep -m1 -E 'error: (argument|unrecognized|the following)' "$out")"
+    return
+  fi
   if [ "$rc" -ge 3 ] || [ "$rc" -lt 0 ]; then
     no "$idx" "$name" "退出码 $rc：$(head -1 "$out")"
     return

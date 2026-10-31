@@ -96,7 +96,14 @@ def read_entries(path):
 
 
 def cmd_show(root, opts):
-    limit = int(opts.get("limit") or 20)
+    try:
+        limit = int(opts.get("limit") or 20)
+    except (TypeError, ValueError):
+        print("--limit 必须是整数")
+        return 2
+    if limit <= 0:
+        print("--limit 必须为正整数")
+        return 2
     want = opts.get("kind")
     entries = []
     if not opts.get("global-only"):

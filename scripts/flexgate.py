@@ -109,7 +109,15 @@ def read_json(p, default=None):
     try:
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return default
+
+
+def as_int(value, default=0):
+    """状态/任务文件被手改坏时也不崩；解析不了按默认值处理。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return default
 
 
@@ -172,6 +180,12 @@ def load_gate_state(repo):
     for k, d in (("light_used", 0), ("heavy_used", 0), ("permits_issued", 0),
                  ("flex_calls", 0), ("permits", []), ("history", [])):
         st.setdefault(k, d)
+    for k in ("round", "epoch", "light_used", "heavy_used", "permits_issued", "flex_calls"):
+        st[k] = as_int(st.get(k), 0)
+    if not isinstance(st.get("permits"), list):
+        st["permits"] = []
+    if not isinstance(st.get("history"), list):
+        st["history"] = []
     return st
 
 
@@ -188,6 +202,26 @@ def log_decision(repo, rec):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def read_gate_log(path):
+    """账本只追加，可能被中断写坏一行；坏行跳过，不让审计整体崩。"""
+    rows = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except (OSError, UnicodeDecodeError):
+        pass
+    return rows
+
+
 def emit(code, task, reason):
     tag = {ALLOW: "ALLOW", QUOTA: "DENY-QUOTA", BUDGET: "DENY-BUDGET",
            REDLINE: "DENY-REDLINE", PERMIT: "DENY-PERMIT",
@@ -201,9 +235,16 @@ def is_relpath(p):
         and not re.match(r"^[A-Za-z]:[\\/]", p) and ".." not in p.split("/")
 
 
+def write_set_digest(files):
+    """令牌绑定的写集指纹：排序后以 NUL 连接再取 sha256。"""
+    blob = "\0".join("\0".join(sorted(files)) + "\0")
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def find_task(doc, task_id):
-    for t in (doc or {}).get("tasks", []):
-        if t.get("id") == task_id:
+    tasks = doc.get("tasks", []) if isinstance(doc, dict) else []
+    for t in tasks:
+        if isinstance(t, dict) and t.get("id") == task_id:
             return t
     return None
 
@@ -224,15 +265,22 @@ def active_permit(st):
 def cmd_check(args):
     P = paths(args.repo)
     doc = read_json(P["tasks"])
+    if not isinstance(doc, dict):
+        doc = {}
     task = find_task(doc, args.task)
     if not task:
         print(f"GATE BAD-TASK {USAGE} {args.task} tasks.json 里找不到该卡")
         return USAGE
     cfg, ignored = flex_rules(args.repo)
     st = load_gate_state(args.repo)
-    rnd = args.round or int((read_json(P["state"], {}) or {}).get("rounds_used", 0)) + 1
+    rnd = args.round or as_int((read_json(P["state"], {}) or {}).get("rounds_used", 0)) + 1
     mode = task.get("mode", "strict")
     ws = task.get("write_set", [])
+    if not isinstance(ws, list) or any(not isinstance(w, str) for w in ws):
+        log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
+                                 "decision": "deny", "code": REDLINE,
+                                 "reason": "write_set 必须是字符串数组"})
+        return emit(REDLINE, args.task, "write_set 必须是字符串数组")
 
     for w in ws:
         code, why = check_target(w)
@@ -250,10 +298,27 @@ def cmd_check(args):
                                          "decision": "deny", "code": PERMIT,
                                          "reason": "多文件写集但无有效 batch 令牌"})
                 return emit(PERMIT, args.task, "多文件写集需先 permit；无有效令牌")
-            if hold["expires_round"] < rnd:
+            if as_int(hold.get("expires_round"), 0) < rnd:
                 log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                                          "decision": "deny", "code": PERMIT, "reason": "令牌越期"})
-                return emit(PERMIT, args.task, f"令牌已越期（expires_round={hold['expires_round']}）")
+                return emit(PERMIT, args.task, f"令牌已越期（expires_round={hold.get('expires_round')}）")
+            if as_int(hold.get("issued_round"), 0) > rnd:
+                log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
+                                         "decision": "deny", "code": PERMIT, "reason": "令牌尚未生效"})
+                return emit(PERMIT, args.task, "令牌尚未生效（issued_round 晚于当前轮）")
+            if hold.get("write_set_sha256") and hold["write_set_sha256"] != write_set_digest(ws):
+                log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
+                                         "decision": "deny", "code": PERMIT,
+                                         "reason": "令牌写集与当前卡不符"})
+                return emit(PERMIT, args.task, "令牌绑定的写集与当前任务卡不一致（写集被改）")
+            if "epoch" in hold:
+                cur_epoch = as_int(doc.get("epoch"), as_int(st.get("epoch"), 0))
+                if as_int(hold.get("epoch"), -1) != cur_epoch:
+                    log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
+                                             "decision": "deny", "code": PERMIT,
+                                             "reason": "令牌 epoch 与当前契约不符"})
+                    return emit(PERMIT, args.task,
+                                f"令牌 epoch={hold.get('epoch')} 与当前 epoch={cur_epoch} 不符")
         log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                                  "decision": "allow", "code": ALLOW, "reason": "strict 轨道"})
         return emit(ALLOW, args.task, "strict 轨道，写集合规")
@@ -270,8 +335,8 @@ def cmd_check(args):
         return emit(REDLINE, args.task, "flex 卡不得声明 acceptance（探索结论不得冒充验收）")
 
     cool = int(cfg["flex_same_target_cool"])
-    recent = [h for h in st["history"] if h.get("task") == args.task
-              and rnd - int(h.get("round", 0)) <= cool and int(h.get("round", 0)) < rnd]
+    recent = [h for h in st["history"] if isinstance(h, dict) and h.get("task") == args.task
+              and rnd - as_int(h.get("round", 0)) <= cool and as_int(h.get("round", 0)) < rnd]
     if recent:
         log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                                  "decision": "deny", "code": QUOTA,
@@ -285,7 +350,7 @@ def cmd_check(args):
 
     host_state = read_json(P["state"], {}) or {}
     # 连续零进展禁 flex（A2/A3）：连击数由 close-round 维护在 state.json，闸门只读不猜
-    streak = int(host_state.get("no_progress_streak", 0) or 0)
+    streak = as_int(host_state.get("no_progress_streak", 0))
     if streak >= int(cfg["flex_no_progress_stop"]):
         log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                                  "decision": "deny", "code": QUOTA,
@@ -293,7 +358,7 @@ def cmd_check(args):
         return emit(QUOTA, args.task,
                     f"连续 {streak} 轮零进展 ≥ {int(cfg['flex_no_progress_stop'])}，本轮禁 flex，应停机升级")
 
-    max_calls = int(((host_state.get("budget", {}) or {}).get("max_calls", 0)) or 0)
+    max_calls = as_int((host_state.get("budget", {}) or {}).get("max_calls", 0))
     if max_calls and st["flex_calls"] / max_calls > float(cfg["flex_budget_ratio"]):
         log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                                  "decision": "deny", "code": BUDGET, "reason": "flex 预算耗尽"})
@@ -308,12 +373,16 @@ def cmd_check(args):
 
 
 def cmd_spend(args):
+    if args.calls < 0:
+        return emit(USAGE, args.task, "--calls 不得为负（防倒扣额度）")
     st = load_gate_state(args.repo)
     cfg, _ = flex_rules(args.repo)
     doc = read_json(paths(args.repo)["tasks"])
     task = find_task(doc, args.task)
-    mode = (task or {}).get("mode", "flex-light")
-    rnd = args.round or int((read_json(paths(args.repo)["state"], {}) or {}).get("rounds_used", 0)) + 1
+    if not task:
+        return emit(USAGE, args.task, "tasks.json 里找不到该卡，拒绝记账")
+    mode = task.get("mode", "flex-light")
+    rnd = args.round or as_int((read_json(paths(args.repo)["state"], {}) or {}).get("rounds_used", 0)) + 1
     if args.new_round:
         st["light_used"] = 0
     st["round"] = rnd
@@ -346,20 +415,27 @@ def cmd_permit(args):
     if len(args.reason.strip()) < 20:
         return emit(PERMIT, task_id, "理由不足 20 字，未说明为何原子不可拆")
     files = [f.strip() for f in args.files.split(",") if f.strip()]
+    if not files:
+        return emit(USAGE, task_id, "--files 不能为空")
+    if args.rounds <= 0:
+        return emit(USAGE, task_id, "--rounds 必须为正")
     for f in files:
         code, why = check_target(f)
         if code != ALLOW:
             return emit(code, task_id, why)
-    blob = "\0".join("\0".join(sorted(files)) + "\0")
-    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    digest = write_set_digest(files)
     P = paths(args.repo)
-    rnd = args.round or int((read_json(P["state"], {}) or {}).get("rounds_used", 0)) + 1
+    rnd = args.round or as_int((read_json(P["state"], {}) or {}).get("rounds_used", 0)) + 1
+    doc = read_json(P["tasks"], {})
+    if not isinstance(doc, dict):
+        doc = {}
     st["permits_issued"] += 1
     st["permits"].append({
         "permit_id": f"P-{st['permits_issued']:02d}",
         "task": task_id, "kind": args.kind, "files": files,
         "write_set_sha256": digest, "issued_round": rnd,
         "expires_round": rnd + args.rounds - 1, "granted_by": "flex-gate",
+        "epoch": as_int(doc.get("epoch"), as_int(st.get("epoch"), 0)),
         "reason": args.reason, "used": False, "revoked": False,
     })
     save_gate_state(args.repo, st)
@@ -407,6 +483,42 @@ def tree_sha256(root):
     return hashlib.sha256("".join(entries).encode("utf-8")).hexdigest(), len(entries), files
 
 
+def read_proposal_status(path):
+    """读提案头部的 status: 行（支持可选的 --- 围栏）；读不到返回 None。"""
+    meta = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            fenced = False
+            for _ in range(40):
+                line = f.readline()
+                if not line:
+                    break
+                s = line.strip()
+                if not s:
+                    break
+                if s == "---":
+                    if fenced:
+                        break
+                    fenced = True
+                    continue
+                if s.startswith("#") and meta:
+                    break
+                if ":" in s:
+                    key, value = s.split(":", 1)
+                    meta[key.strip().lower()] = value.strip()
+    except OSError:
+        return None
+    return meta.get("status")
+
+
+def proposal_state(status):
+    """把 status 文本归一成 merged / approved / draft / rejected / superseded / unknown。"""
+    if not status:
+        return "unknown"
+    word = re.split(r"[\s（(]", status.strip().lower(), maxsplit=1)[0]
+    return word or "unknown"
+
+
 def cmd_audit(args):
     P = paths(args.repo)
     st = load_gate_state(args.repo)
@@ -416,8 +528,13 @@ def cmd_audit(args):
     else:
         fingerprint, n, files = "0" * 64, 0, []
     artifacts = ["sandbox/" + f for f in files]
-    gate = [json.loads(l) for l in open(P["gate_log"], encoding="utf-8")] \
-        if os.path.exists(P["gate_log"]) else []
+    gate = read_gate_log(P["gate_log"])
+    proposal_files = [p for p in artifacts
+                      if p.startswith("sandbox/proposals/") and "CHANGE_PROPOSAL-" in p]
+    proposal_status = {p: read_proposal_status(os.path.join(args.repo, p))
+                       for p in proposal_files}
+    proposal_state_map = {p: proposal_state(s) for p, s in proposal_status.items()}
+    open_states = ("draft", "approved", "pending", "proposed")
     doc = {
         "round": args.round,
         "epoch": st.get("epoch", 0),
@@ -427,8 +544,11 @@ def cmd_audit(args):
         "sandbox_tree_sha256": fingerprint,
         "sandbox_files": n,
         "artifacts": artifacts,
-        "proposals": [p for p in artifacts
-                      if p.startswith("sandbox/proposals/") and "CHANGE_PROPOSAL-" in p],
+        "proposals": proposal_files,
+        "proposal_status": proposal_status,
+        "proposal_state": proposal_state_map,
+        "open_proposals": [p for p in proposal_files
+                           if proposal_state_map[p] in open_states],
         "hypo_checks": [p for p in artifacts if p.startswith("sandbox/hypo/")],
         "denials": [g for g in gate if g.get("code") not in (0, None)],
         "hard_failures": [g for g in gate if g.get("code") == REDLINE],

@@ -444,8 +444,11 @@ def cmd_scan(repo, opts):
         "duplicates": duplicates,
         "skills": skills,
     }
-    with open(os.path.join(ap, "capabilities.json"), "w", encoding="utf-8") as f:
+    cap_path = os.path.join(ap, "capabilities.json")
+    tmp_path = cap_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, cap_path)
 
     keep = {"MCP": [], "Agents": []}
     index_path = os.path.join(ap, "CAPABILITIES.md")
@@ -529,8 +532,10 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
         scan_opts["json"] = False
         scan_opts["quiet"] = True
         cmd_scan(repo, scan_opts)
-    with open(doc_path, encoding="utf-8") as f:
-        doc = json.load(f)
+    doc = load_json(doc_path)
+    if not isinstance(doc, dict):
+        print(f"索引损坏或不可读: {doc_path}（重新运行 scan）")
+        return 1
 
     q_tokens = expand(tokens(query))
     q_set = set(q_tokens)
@@ -542,16 +547,26 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
         if isinstance(pol, dict):
             policy = pol
 
-    banned = {normalize_name(b) for b in policy.get("ban", [])}
+    ban_raw = policy.get("ban")
+    banned = {normalize_name(str(b)) for b in ban_raw} if isinstance(ban_raw, list) else set()
+    boosts = policy.get("boost") if isinstance(policy.get("boost"), dict) else {}
 
     docs = []
-    for s in doc.get("skills", []):
-        if s["key"] in banned:
+    skills = doc.get("skills")
+    if not isinstance(skills, list):
+        skills = []
+    for s in skills:
+        if not isinstance(s, dict):
             continue
-        d_tokens = tokens(s["name"]) * 3 + tokens(s["desc"])
+        key = str(s.get("key") or "")
+        if key and key in banned:
+            continue
+        name = str(s.get("name") or s.get("load") or "")
+        desc = str(s.get("desc") or "")
+        d_tokens = tokens(name) * 3 + tokens(desc)
         docs.append({
-            "type": "skill", "name": s["load"], "desc": s["desc"],
-            "path": s["path"], "tokens": d_tokens,
+            "type": "skill", "name": str(s.get("load") or name), "desc": desc,
+            "path": str(s.get("path") or ""), "tokens": d_tokens,
         })
 
     for entry in load_mcp_agents(ap)["mcp"]:
@@ -567,17 +582,23 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
     if os.path.exists(remote_path):
         remote_doc = load_json(remote_path)
         remote_items = remote_doc.get("items", []) if isinstance(remote_doc, dict) else []
+        if not isinstance(remote_items, list):
+            remote_items = []
         for item in remote_items:
+            if not isinstance(item, dict):
+                continue
             if item.get("blocked") and not include_blocked:
                 continue
-            desc = item.get("desc", "")
-            body = read_text(item.get("local_path", ""), 4096) if item.get("local_path") else ""
+            name = str(item.get("name") or "?")
+            desc = str(item.get("desc") or "")
+            local = str(item.get("local_path") or "")
+            body = read_text(local, 4096) if local else ""
             docs.append({
                 "type": f"remote:{item.get('risk', '?')}",
-                "name": item.get("name", "?"),
+                "name": name,
                 "desc": desc or body[:300],
-                "path": item.get("local_path") or item.get("raw_url", ""),
-                "tokens": tokens(item.get("name", "")) * 3 + tokens(desc) + tokens(body),
+                "path": local or str(item.get("raw_url") or ""),
+                "tokens": tokens(name) * 3 + tokens(desc) + tokens(body),
             })
 
     n = len(docs) or 1
@@ -598,9 +619,11 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
         if score <= 0:
             continue
         score /= math.sqrt(len(q_set) + 4)
-        for key, names in policy.get("boost", {}).items():
+        for key, names in boosts.items():
+            if not isinstance(names, list):
+                continue
             if key.lower() in query.lower() and any(
-                    normalize_name(x) in normalize_name(d["name"]) for x in names):
+                    normalize_name(str(x)) in normalize_name(d["name"]) for x in names):
                 score += 0.6
         hits = sorted({t for t in q_set if t in tf})
         results.append((round(score, 3), d, hits))
@@ -626,22 +649,43 @@ def cmd_match(repo, query, top=8, kind=None, as_json=False, include_blocked=Fals
     return 0
 
 
-def cmd_stats(repo):
+def cmd_stats(repo, as_json=False):
     path = os.path.join(repo, ".autopilot", "capabilities.json")
     if not os.path.exists(path):
         print("还没有索引，先 scan")
         return 2
-    doc = json.load(open(path, encoding="utf-8"))
-    print(f"生成: {doc.get('generated_at')}")
-    print(f"扫描: {doc.get('scanned')}  去重: {doc.get('unique')}  重复: {doc.get('duplicates')}")
-    print(f"根目录: {', '.join(doc.get('roots', []))}")
-    print(f"根目录来源: {doc.get('roots_source', '?')}")
+    doc = load_json(path)
+    if not isinstance(doc, dict):
+        print(f"索引损坏或不可读: {path}（重新运行 scan）")
+        return 2
+    roots = doc.get("roots")
+    roots_list = [str(r) for r in roots] if isinstance(roots, list) else []
     agents = load_mcp_agents(os.path.join(repo, ".autopilot"))
-    print(f"MCP 条目: {len(agents['mcp'])}  智能体条目: {len(agents['agent'])}")
     remote_path = os.path.join(repo, ".autopilot", "remote", "registry.json")
     remote_doc = load_json(remote_path)
     remote_items = remote_doc.get("items", []) if isinstance(remote_doc, dict) else []
-    blocked = sum(1 for i in remote_items if i.get("blocked"))
+    if not isinstance(remote_items, list):
+        remote_items = []
+    blocked = sum(1 for i in remote_items if isinstance(i, dict) and i.get("blocked"))
+    if as_json:
+        print(json.dumps({
+            "generated_at": doc.get("generated_at"),
+            "scanned": doc.get("scanned"),
+            "unique": doc.get("unique"),
+            "duplicates": doc.get("duplicates"),
+            "roots": roots_list,
+            "roots_source": doc.get("roots_source"),
+            "mcp": len(agents["mcp"]),
+            "agents": len(agents["agent"]),
+            "remote": len(remote_items),
+            "blocked": blocked,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    print(f"生成: {doc.get('generated_at')}")
+    print(f"扫描: {doc.get('scanned')}  去重: {doc.get('unique')}  重复: {doc.get('duplicates')}")
+    print(f"根目录: {', '.join(roots_list)}")
+    print(f"根目录来源: {doc.get('roots_source', '?')}")
+    print(f"MCP 条目: {len(agents['mcp'])}  智能体条目: {len(agents['agent'])}")
     print(f"远程条目: {len(remote_items)}（blocked {blocked}）")
     return 0
 
@@ -734,8 +778,11 @@ def main():
     if args.cmd == "scan":
         return cmd_scan(repo, opts)
     if args.cmd == "stats":
-        return cmd_stats(repo)
+        return cmd_stats(repo, getattr(args, "json", False))
     if args.cmd == "match":
+        if args.top < 1:
+            print("--top 必须是正整数")
+            return 2
         return cmd_match(repo, args.query, top=args.top, kind=args.type,
                          as_json=args.json, include_blocked=args.include_blocked,
                          opts=opts)

@@ -16,6 +16,7 @@
 
 import datetime
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -169,11 +170,14 @@ def fetch(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
-            final_host = urllib.parse.urlparse(resp.geturl()).hostname or ""
+            final = urllib.parse.urlparse(resp.geturl())
+            if final.scheme != "https":
+                return None, f"重定向到非 https: {final.scheme}"
+            final_host = final.hostname or ""
             if is_private_host(final_host):
                 return None, f"重定向到内网地址: {final_host}"
             data = resp.read(MAX_BYTES + 1)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ValueError) as exc:
         return None, f"下载失败: {exc}"
     if len(data) > MAX_BYTES:
         return None, "文件超过 2MB"
@@ -258,17 +262,22 @@ def load_registry(repo):
     path = registry_path(repo)
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+            doc = json.load(f)
+    except (OSError, ValueError):
         return {"items": []}
+    if not isinstance(doc, dict) or not isinstance(doc.get("items"), list):
+        return {"items": []}
+    return doc
 
 
 def save_registry(repo, doc):
     path = registry_path(repo)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     doc["generated_at"] = now_iso()
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def safe_name(text):
@@ -345,15 +354,16 @@ def cmd_add(repo, url, name=None, note="", force=False):
     final_name = safe_name(name or guess)
 
     base = os.path.join(repo, ".autopilot", "remote")
+    base_name = final_name
     target = os.path.join(base, final_name)
+    taken = {i.get("name") for i in (load_registry(repo).get("items") or [])
+             if isinstance(i, dict)}
     suffix = 2
-    while os.path.exists(target) and load_registry(repo).get("items"):
-        if any(i.get("name") == final_name for i in load_registry(repo)["items"]):
-            target = os.path.join(base, f"{final_name}-{suffix}")
-            final_name = f"{final_name}-{suffix}"
-            suffix += 1
-        else:
-            break
+    # 目录已存在（哪怕 registry 里没有记录，例如手工放置的）也换名，绝不覆写。
+    while os.path.exists(target) or final_name in taken:
+        final_name = f"{base_name}-{suffix}"
+        target = os.path.join(base, final_name)
+        suffix += 1
 
     risk, flags, deps = vet_text(text)
     blocked = risk == "high" and not force
@@ -427,7 +437,11 @@ def cmd_vet(repo, name):
     if not item:
         print(f"没有这个条目: {name}")
         return 2
-    text = read_text(item["local_path"])
+    path = str(item.get("local_path") or "")
+    if not path or not os.path.isfile(path):
+        print(f"{name}: 本地文件缺失，无法复审（{path or '无路径'}）")
+        return 2
+    text = read_text(path)
     risk, flags, deps = vet_text(text)
     item.update({"risk": risk, "flags": flags, "deps": deps,
                  "blocked": risk == "high"})
@@ -460,9 +474,16 @@ def cmd_remove(repo, name):
     if not item:
         print(f"没有这个条目: {name}")
         return 2
-    d = os.path.dirname(item["local_path"])
-    if os.path.isdir(d) and os.path.abspath(d).startswith(os.path.abspath(
-            os.path.join(repo, ".autopilot", "remote"))):
+    path = str(item.get("local_path") or "")
+    d = os.path.dirname(os.path.abspath(path)) if path else ""
+    base = os.path.abspath(os.path.join(repo, ".autopilot", "remote"))
+    inside = False
+    if d:
+        try:
+            inside = os.path.commonpath([base, d]) == base and d != base
+        except ValueError:
+            inside = False
+    if os.path.isdir(d) and inside:
         shutil.rmtree(d)
     reg["items"] = [i for i in reg["items"] if i.get("name") != name]
     save_registry(repo, reg)
@@ -478,15 +499,36 @@ def main():
     cmd, args = argv[0], argv[1:]
     opts = {"pos": [], "limit": 8, "owner": None, "name": None,
             "note": "", "force": False, "kind": "skill"}
+    def parse_limit(value):
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            print(f"--limit 必须是整数，实际 {value}")
+            return None
+        if not 1 <= n <= 100:
+            print(f"--limit 超出范围 1..100，实际 {n}")
+            return None
+        return n
+
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--limit", "--owner", "--name", "--note", "--kind") and i + 1 < len(args):
-            opts[a.strip("-")] = int(args[i + 1]) if a == "--limit" else args[i + 1]
+        if a in ("--limit", "--owner", "--name", "--note", "--kind"):
+            if i + 1 >= len(args):
+                print(f"{a} 缺少参数值")
+                return 2
+            if a == "--limit":
+                opts["limit"] = parse_limit(args[i + 1])
+                if opts["limit"] is None:
+                    return 2
+            else:
+                opts[a[2:]] = args[i + 1]
             i += 2
             continue
         if a.startswith("--limit="):
-            opts["limit"] = int(a.split("=", 1)[1])
+            opts["limit"] = parse_limit(a.split("=", 1)[1])
+            if opts["limit"] is None:
+                return 2
         elif a.startswith("--owner="):
             opts["owner"] = a.split("=", 1)[1]
         elif a.startswith("--name="):

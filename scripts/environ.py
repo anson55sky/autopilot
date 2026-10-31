@@ -82,7 +82,7 @@ def read_json(p, default=None):
     try:
         with open(p, encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return default
 
 
@@ -355,6 +355,8 @@ def compute_skipped(repo, caps, checks_dir):
                          "skipped_acceptance 输出空映射；请补齐 A#→能力映射以启用 SKIP 判定"), 0
     for aid, reqs in sorted(needs.items()):
         if isinstance(reqs, str):
+            reqs = [reqs]
+        elif not isinstance(reqs, list):
             reqs = [reqs]
         for cap in reqs:
             if not caps.get(cap):

@@ -43,7 +43,8 @@
 工人独立上下文只读 GOAL/CHARTER/任务卡/指名段落；同一任务失败两次转 Triage。
 
 1.4 验证：谁写谁不验；验证者默认判不合格；对抗检查（空输入、超长、并发、异常路径、退出码、回归、
-硬编码探针值与时间步长作弊）；缺口四问；输出 `rounds/r-XX.json`（verdict/passed/failed/evidence/blind_spots）。
+硬编码探针值与时间步长作弊）；缺口四问；输出 `rounds/r-XX.json`（verdict/passed/failed/evidence/blind_spots；
+有并行派发时补 `parallel_peak`，供轮次指标统计并发峰值）。
 
 1.5 长跑引擎：一轮一会话；接续包（`resume.py`）恢复而不回放历史；`close-round` 按轮号幂等；
 不可逆动作命中清单即机械拒绝并转待批；轮次提示词由 `round_prompt.sh` 生成；支持硬停失控会话。

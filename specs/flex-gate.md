@@ -95,11 +95,19 @@ say / osascript 发送通知或消息 / 任何 mail、slack、飞书发消息 CL
   `ts` 一律 ISO8601 且**必须带时区偏移**；缺偏移会让下游 aware/naive 相减直接抛 TypeError（C3）。
 - `rounds/r-XX.flex.json`（A8）：
   ```json
-  {"round":1,"epoch":0,"flex_used":2,"budget_after":{"calls":3,"minutes":11},
-   "sandbox_tree_sha256":"<目录树指纹>","artifacts":["sandbox/proposals/P-1.md"],
-   "proposals":["P-1"],"hypo_checks":["sandbox/hypo/HYPOTHESIS_CHECK.md"],
+  {"round":1,"epoch":0,
+   "flex_used":{"light":2,"heavy":0,"calls":3,"permits_issued":0},
+   "sandbox_tree_sha256":"<目录树指纹>","sandbox_files":4,
+   "artifacts":["sandbox/proposals/CHANGE_PROPOSAL-001.md"],
+   "proposals":["sandbox/proposals/CHANGE_PROPOSAL-001.md"],
+   "proposal_status":{"sandbox/proposals/CHANGE_PROPOSAL-001.md":"draft（待批）"},
+   "proposal_state":{"sandbox/proposals/CHANGE_PROPOSAL-001.md":"draft"},
+   "open_proposals":["sandbox/proposals/CHANGE_PROPOSAL-001.md"],
+   "hypo_checks":["sandbox/hypo/HYPOTHESIS_CHECK.md"],
    "hard_failures":[]}
   ```
+  `proposal_state` 取提案文件头 `status:` 的首词（merged / approved / draft / rejected / superseded / unknown）；
+  `open_proposals` 只收未结提案（draft / approved / pending / proposed），供 REPORT 统计积压。
   目录树指纹算法：对 `sandbox/` 下每个文件按路径排序，`path\0sha256(content)\0` 串联后再取 sha256。
   sandbox 内容不进版本库也要留指纹，否则"可审计"只是说法。
 - REPORT 必须引用 `r-XX.flex.json` 与 gate 计数；两者不一致视为契约风险（M2/M9）。

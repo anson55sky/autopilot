@@ -264,7 +264,61 @@ sys.exit(0 if "flex" in f and f.get("flex") == 1 and f.get("decisions") == 1 and
     pass 6 "flex 轮次收轮幂等且记上 flex 字段"
 }
 
-# ---------------------------------------------------------------- C5
+# ---------------------------------------------------------------- C5（合同变更轮）
+
+case_contract_change() {
+    repo=$(new_repo c8)
+    mkdir -p "$repo/.autopilot/rounds"
+    cat > "$repo/.autopilot/state.json" <<'EOF'
+{"started_at": "2026-01-01T00:00:00+00:00", "phase": "execute", "rounds_used": 1, "closed_rounds": [1], "no_progress_streak": 1, "last_passed": ["A1"], "budget": {"max_rounds": 10}}
+EOF
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "epoch": 0, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    cat > "$repo/.autopilot/rounds/r-02.json" <<'EOF'
+{"round": 2, "epoch": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-02.json" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 9 "合同变更轮收轮退出码 $rc: $out"
+        return
+    fi
+    streak=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("no_progress_streak"))' "$repo/.autopilot/state.json")
+    if [ "$streak" != "0" ]; then
+        fail 9 "合同变更轮后零进展连击应为 0，实际 $streak: $out"
+        return
+    fi
+    case "$out" in
+        *"合同 epoch 0→1"*) ;;
+        *) fail 9 "收轮输出没记合同变更: $out"; return ;;
+    esac
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+cc = (d.get("detail") or {}).get("contract_change") or {}
+sys.exit(0 if cc.get("from") == 0 and cc.get("to") == 1 else 1)' \
+        "$repo/.autopilot/rounds/r-02.metrics.json"; then
+        fail 9 "指标文件没记 contract_change"
+        return
+    fi
+    cat > "$repo/.autopilot/rounds/r-03.json" <<'EOF'
+{"round": 3, "epoch": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-03.json" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 9 "同 epoch 收轮退出码 $rc: $out"
+        return
+    fi
+    streak=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("no_progress_streak"))' "$repo/.autopilot/state.json")
+    if [ "$streak" != "1" ]; then
+        fail 9 "同 epoch 且无新增通过应计 1 次零进展，实际 $streak: $out"
+        return
+    fi
+    pass 9 "合同变更轮不计零进展，同 epoch 空轮仍计"
+}
+
+# ---------------------------------------------------------------- C6（审计文件隔离 + 指标）
 
 case_audit_not_record() {
     repo=$(new_repo c8)
@@ -340,14 +394,80 @@ sys.exit(1 if missing else 0)' "$repo/.autopilot/rounds/r-01.metrics.json"; then
     pass 7 "收轮写出指标文件且字段齐全"
 }
 
+# ---------------------------------------------------------------- C7（返工率与并发峰值）
+
+case_rework_parallel() {
+    repo=$(new_repo c9)
+    mkdir -p "$repo/.autopilot/rounds"
+    write_state "$repo/.autopilot/state.json" '"2026-01-01T07:00:00+00:00"'
+    cat > "$repo/.autopilot/ledger.jsonl" <<'EOF'
+{"type": "worker", "task": "t-1", "ts": "2026-01-01T08:00:00+00:00"}
+{"type": "worker", "task": "t-1", "ts": "2026-01-01T08:10:00+00:00"}
+{"type": "worker", "task": "t-2", "ts": "2026-01-01T08:15:00+00:00"}
+{"type": "verifier", "task": "t-1", "ts": "2026-01-01T08:20:00+00:00"}
+EOF
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "epoch": 0, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 1, "started_at": "2026-01-01T08:00:00+00:00", "parallel_peak": 2}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-01.json" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 10 "收轮退出码 $rc: $out"
+        return
+    fi
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d.get("max_parallel") == 2 and d.get("rework_rate") == 0.25 else 1)' \
+        "$repo/.autopilot/rounds/r-01.metrics.json"; then
+        fail 10 "并发峰值或返工率不对: $(cat "$repo/.autopilot/rounds/r-01.metrics.json")"
+        return
+    fi
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+bad = [k for k in ("max_parallel", "rework_rate") if k in (d.get("unknown_reasons") or {})]
+sys.exit(1 if bad else 0)' "$repo/.autopilot/rounds/r-01.metrics.json"; then
+        fail 10 "两项已有明证却仍记 unknown_reasons"
+        return
+    fi
+    pass 10 "重复派发推出返工率 0.25，parallel_peak 记入并发峰值"
+}
+
+# ---------------------------------------------------------------- C8（异形 JSON 不崩）
+
+case_corrupt_files() {
+    repo=$(new_repo c10)
+    mkdir -p "$repo/.autopilot/checks"
+    printf '%s\n' '{"goal": 123, "phase": "weird", "rounds_used": "x", "no_progress_streak": "y", "budget": {"max_rounds": "z"}}' \
+        > "$repo/.autopilot/state.json"
+    printf '[1,2]\n' > "$repo/.autopilot/tasks.json"
+    printf '[1,2]\n' > "$repo/.autopilot/checks/last-result.json"
+    printf '%s\n' '{broken' '{"type":"worker","ts":"nope"}' > "$repo/.autopilot/ledger.jsonl"
+    out=$($PY "$STATUS" summary "$repo" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 11 "异形 JSON 下 summary 退出码 $rc: $out"
+        return
+    fi
+    case "$out" in
+        *Traceback*) fail 11 "异形 JSON 下出现 traceback"; return ;;
+    esac
+    case "$out" in
+        *"目标:"*) pass 11 "异形 JSON 下 summary 不崩且照样输出" ;;
+        *) fail 11 "异形 JSON 下 summary 输出不完整: $out" ;;
+    esac
+}
+
 case_naive
 case_garbage
 case_empty
 case_aware
 case_close_twice
 case_flex_round
+case_contract_change
 case_audit_not_record
 case_metrics
+case_rework_parallel
+case_corrupt_files
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"
