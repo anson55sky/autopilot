@@ -186,7 +186,8 @@ def load_tasks(ap):
 # ---------------------------------------------------------------- flex 闸门
 
 def gate_dirs(root, ap):
-    # 0.9 的闸门在 .autopilot/sandbox/.gate/；resume.py 用的是 sandbox/.gate/，两处都认
+    # 生产者（flexgate.py / resume.py）用 <repo>/sandbox/.gate/；
+    # 另一种布局 <ap>/sandbox/.gate/ 也认，避免工作区迁移后读不到。
     return [os.path.join(ap, "sandbox", ".gate"), os.path.join(root, "sandbox", ".gate")]
 
 
@@ -194,31 +195,34 @@ def classify_decision(event):
     """把一条闸门决策归成 light/heavy/flex/deny/other；认不出就记 other。"""
     if not isinstance(event, dict):
         return "other"
+    texts = []
     for key in GATE_DECISION_KEYS:
         val = event.get(key)
-        if not isinstance(val, str):
-            continue
-        text = val.strip().lower()
-        if not text:
-            continue
+        if isinstance(val, str) and val.strip():
+            texts.append(val.strip().lower())
+    # 生产者的一次决策既有 decision（allow/spend/deny）又有 mode（flex-light），
+    # 所以要把所有键扫完再定级，不能在第一个认不出的键上提前返回 other。
+    for text in texts:
         if any(w in text for w in ("deny", "reject", "block", "refuse")):
             return "deny"
+    for text in texts:
         if "flex" in text:
             # flex-light / flex_heavy 都算 flex 通道（先判 flex 再判 light）
             return "flex"
+    for text in texts:
         if "heavy" in text:
             return "heavy"
+    for text in texts:
         if "light" in text:
             return "light"
-        return "other"
     return "other"
 
 
 def read_gate(root, ap):
-    """读 flex 闸门：state.json 计数器 + gatem.jsonl 决策流。"""
+    """读 flex 闸门：state.json 计数器 + gate.jsonl 决策流。"""
     base = None
     for d in gate_dirs(root, ap):
-        if os.path.isfile(os.path.join(d, "state.json")) or os.path.isfile(os.path.join(d, "gatem.jsonl")):
+        if os.path.isfile(os.path.join(d, "state.json")) or os.path.isfile(os.path.join(d, "gate.jsonl")):
             base = d
             break
     if base is None:
@@ -237,7 +241,7 @@ def read_gate(root, ap):
         light = to_int(st.get("light_used"))
         heavy = to_int(st.get("heavy_used"))
         flex = to_int(st.get("flex_calls"))
-    rows = read_jsonl(os.path.join(base, "gatem.jsonl"))
+    rows = read_jsonl(os.path.join(base, "gate.jsonl"))
     kinds = {"light": 0, "heavy": 0, "flex": 0, "deny": 0, "other": 0}
     for row in rows:
         kinds[classify_decision(row)] += 1
@@ -245,7 +249,7 @@ def read_gate(root, ap):
     decisions.update(kinds)
     reason = None
     if st is None and not rows:
-        reason = "sandbox/.gate 下没有 state.json 也没有 gatem.jsonl，flex 用量未知"
+        reason = "sandbox/.gate 下没有 state.json 也没有 gate.jsonl，flex 用量未知"
     return {"present": True, "path": base, "light_used": light, "heavy_used": heavy,
             "flex_calls": flex, "decisions": decisions, "reason": reason}
 
@@ -426,12 +430,16 @@ def rework_rate(events, tasks, start, calls):
 
 
 def flex_usage_rate(flex_delta, dec_flex_delta, dec_total_delta, calls, gate_total_delta):
-    """flex 使用率：优先用闸门决策流（一条决策算一次调用，不会重复计数）。"""
+    """flex 使用率：先按「flex 调用 ÷ 本轮总调用」算（A3 的预算占比口径）。
+
+    决策流只覆盖闸门流量，不覆盖 strict 卡，单独用它算占比会得出 100% 的假象；
+    只有在调用数未知时才退回决策流。
+    """
+    if flex_delta is not None and calls:
+        return flex_delta / calls, "flex 调用 %d 次 ÷ 本轮调用 %d 次" % (flex_delta, calls)
     if dec_flex_delta is not None and dec_total_delta:
         return (dec_flex_delta / dec_total_delta,
                 "闸门决策流里 flex 决策 %d 次 ÷ 总决策 %d 次" % (dec_flex_delta, dec_total_delta))
-    if flex_delta is not None and calls:
-        return flex_delta / calls, "flex 调用 %d 次 ÷ 本轮调用 %d 次" % (flex_delta, calls)
     if flex_delta is not None and gate_total_delta:
         return flex_delta / gate_total_delta, "flex 计数 %d ÷ 闸门总计数 %d（计数器可能互相重叠）" % (
             flex_delta, gate_total_delta)

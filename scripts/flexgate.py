@@ -65,7 +65,26 @@ DENY_PATTERNS = [
     (r"\b(security\s+find-internet-password|cat[^\n]*/\.ssh/|\.aws/credentials|\.env\b[^\n]*\b(cat|printenv|echo))", "读取凭据"),
 ]
 
-GATE_VERSION = "0.9.0-dev"
+
+def _gate_version():
+    """审计里必须能看出闸门是哪一版；读不到协议文档时退化为 unknown。
+
+    草稿仓里协议文档叫 02-SKILL-0.9.md，切到线上后叫 SKILL.md —— 两个名字都要认，
+    否则审计会静默退化成 "autopilot unknown"。
+    """
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("SKILL.md", "02-SKILL-0.9.md"):
+        try:
+            with open(os.path.join(skill_dir, name), encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("version:"):
+                        return "autopilot " + line.split(":", 1)[1].strip()
+        except OSError:
+            continue
+    return "autopilot unknown"
+
+
+GATE_VERSION = _gate_version()
 
 
 def now_utc():
@@ -295,6 +314,9 @@ def cmd_spend(args):
     task = find_task(doc, args.task)
     mode = (task or {}).get("mode", "flex-light")
     rnd = args.round or int((read_json(paths(args.repo)["state"], {}) or {}).get("rounds_used", 0)) + 1
+    if args.new_round:
+        st["light_used"] = 0
+    st["round"] = rnd
     if mode == "flex-light":
         st["light_used"] += 1
     elif mode == "flex-heavy":
@@ -305,8 +327,6 @@ def cmd_spend(args):
             return emit(QUOTA, args.task, f"flex-heavy 提案超过 {int(cfg['heavy_proposals'])} 条，应停机升级")
     st["flex_calls"] += args.calls
     st["history"].append({"round": rnd, "task": args.task, "mode": mode, "ts": now_utc()})
-    if args.new_round:
-        st["light_used"] = 0
     save_gate_state(args.repo, st)
     log_decision(args.repo, {"round": rnd, "task": args.task, "mode": mode,
                              "decision": "spend", "code": ALLOW, "reason": args.reason})
@@ -366,6 +386,7 @@ def cmd_revoke(args):
 
 def tree_sha256(root):
     entries = []
+    files = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
         for fn in sorted(filenames):
@@ -380,15 +401,21 @@ def tree_sha256(root):
                         h.update(chunk)
             except OSError:
                 h.update(b"<unreadable>")
-            entries.append(rel.replace(os.sep, "/") + "\0" + h.hexdigest() + "\0")
-    return hashlib.sha256("".join(entries).encode("utf-8")).hexdigest(), len(entries)
+            rel_posix = rel.replace(os.sep, "/")
+            entries.append(rel_posix + "\0" + h.hexdigest() + "\0")
+            files.append(rel_posix)
+    return hashlib.sha256("".join(entries).encode("utf-8")).hexdigest(), len(entries), files
 
 
 def cmd_audit(args):
     P = paths(args.repo)
     st = load_gate_state(args.repo)
     sandbox = os.path.join(args.repo, "sandbox")
-    fingerprint, n = tree_sha256(sandbox) if os.path.isdir(sandbox) else ("0" * 64, 0)
+    if os.path.isdir(sandbox):
+        fingerprint, n, files = tree_sha256(sandbox)
+    else:
+        fingerprint, n, files = "0" * 64, 0, []
+    artifacts = ["sandbox/" + f for f in files]
     gate = [json.loads(l) for l in open(P["gate_log"], encoding="utf-8")] \
         if os.path.exists(P["gate_log"]) else []
     doc = {
@@ -399,6 +426,10 @@ def cmd_audit(args):
                       "calls": st["flex_calls"], "permits_issued": st["permits_issued"]},
         "sandbox_tree_sha256": fingerprint,
         "sandbox_files": n,
+        "artifacts": artifacts,
+        "proposals": [p for p in artifacts
+                      if p.startswith("sandbox/proposals/") and "CHANGE_PROPOSAL-" in p],
+        "hypo_checks": [p for p in artifacts if p.startswith("sandbox/hypo/")],
         "denials": [g for g in gate if g.get("code") not in (0, None)],
         "hard_failures": [g for g in gate if g.get("code") == REDLINE],
         "ts": now_utc(),

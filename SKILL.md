@@ -10,7 +10,7 @@ description: >-
   人类审美判断的任务。
 color: cyan
 emoji: 🛫
-version: 0.9.2-detour
+version: 0.9.3-detour
 ---
 
 # autopilot 0.9「detour」

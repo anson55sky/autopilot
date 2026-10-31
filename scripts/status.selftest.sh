@@ -216,13 +216,13 @@ EOF
 
 case_flex_round() {
     repo=$(new_repo c6)
-    mkdir -p "$repo/.autopilot/rounds" "$repo/.autopilot/sandbox/.gate"
+    mkdir -p "$repo/.autopilot/rounds" "$repo/sandbox/.gate"
     write_state "$repo/.autopilot/state.json" '"2026-01-01T07:00:00+08:00"'
-    cat > "$repo/.autopilot/sandbox/.gate/state.json" <<'EOF'
+    cat > "$repo/sandbox/.gate/state.json" <<'EOF'
 {"light_used": 1, "heavy_used": 0, "flex_calls": 1, "permits": [{"permit_id": "p-1", "used": false, "revoked": false}]}
 EOF
-    cat > "$repo/.autopilot/sandbox/.gate/gatem.jsonl" <<'EOF'
-{"ts": "2026-01-01T08:00:00+08:00", "decision": "flex-light", "task": "t-1"}
+    cat > "$repo/sandbox/.gate/gate.jsonl" <<'EOF'
+{"round": 1, "task": "t-1", "mode": "flex-light", "decision": "allow", "code": 0, "reason": "额度内", "ts": "2026-01-01T08:00:00+08:00", "gate_version": "autopilot selftest"}
 EOF
     cat > "$repo/.autopilot/ledger.jsonl" <<'EOF'
 {"type": "worker", "task": "t-1", "ts": "2026-01-01T08:00:00+08:00"}
@@ -240,7 +240,7 @@ EOF
     if ! $PY -c 'import json,sys
 d = json.load(open(sys.argv[1]))
 f = d.get("flex") or {}
-sys.exit(0 if "flex" in f and f.get("flex") == 1 and f.get("decisions") == 1 else 1)' \
+sys.exit(0 if "flex" in f and f.get("flex") == 1 and f.get("decisions") == 1 and f.get("flex_decisions") == 1 else 1)' \
         "$repo/.autopilot/rounds/r-01.json"; then
         fail 6 "轮次记录里没记上 flex 用量"
         return

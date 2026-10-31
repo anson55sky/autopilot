@@ -102,6 +102,19 @@ expect 23 "令牌回收后 strict 多文件重新被拒"  g check --repo "$TMP" 
 
 # 零进展连击 → flex 应被禁（连击数来自 state.json，闸门只读不猜）
 g spend --repo "$TMP" --task T-06 --reason "重置每轮计数以单独验证零进展规则" --calls 0 --round 5 --new-round >/dev/null
+# --new-round 必须先清零再记账：本轮第一次 spend 不能被自己吞掉（曾把 light_used 记成 0）
+if python3 - "$TMP" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1] + "/sandbox/.gate/state.json", encoding="utf-8"))
+ok = st.get("light_used") == 1 and st.get("round") == 5
+print(json.dumps({"light_used": st.get("light_used"), "round": st.get("round")}))
+sys.exit(0 if ok else 1)
+PY
+then
+  idx=$((idx + 1)); printf 'RESULT S%s PASS --new-round 先清零再记账，首次 spend 计入 1\n' "$idx"
+else
+  idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL --new-round 吞掉了首次 spend\n' "$idx"
+fi
 python3 - "$TMP" <<'PY'
 import json, sys
 p = sys.argv[1] + "/.autopilot/state.json"
@@ -143,15 +156,25 @@ expect 24 "黑名单: 读凭据"          g deny-list --check "cat ~/.ssh/id_rsa
 expect 0  "普通命令不误伤"          g deny-list --check "ls -la && node --version"
 
 g spend --repo "$TMP" --task T-07 --reason "把 flex_calls 打满以触发预算闸" --calls 20 --round 9 --new-round >/dev/null
+mkdir -p "$TMP/sandbox/hypo" && printf 'x\n' > "$TMP/sandbox/hypo/HYPOTHESIS_CHECK.md"
 expect 21 "flex 预算超比例 → 拒绝"            g check --repo "$TMP" --task T-08 --round 9
 expect 0  "audit 生成 flex 审计"              g audit --repo "$TMP" --round 9
 
-# 审计文件必须存在且带 sandbox 树指纹
+# 审计文件必须存在且带 sandbox 树指纹 + 探索产物清单（hypo/proposals/artifacts 三键）
 if [ -f "$TMP/.autopilot/rounds/r-09.flex.json" ] \
-   && grep -q '"sandbox_tree_sha256"' "$TMP/.autopilot/rounds/r-09.flex.json"; then
-  idx=$((idx + 1)); printf 'RESULT S%s PASS r-09.flex.json 落盘并含 sandbox 树指纹\n' "$idx"
+   && grep -q '"sandbox_tree_sha256"' "$TMP/.autopilot/rounds/r-09.flex.json" \
+   && grep -q '"artifacts"' "$TMP/.autopilot/rounds/r-09.flex.json" \
+   && grep -q '"hypo_checks"' "$TMP/.autopilot/rounds/r-09.flex.json" \
+   && grep -q 'sandbox/hypo/HYPOTHESIS_CHECK.md' "$TMP/.autopilot/rounds/r-09.flex.json"; then
+  idx=$((idx + 1)); printf 'RESULT S%s PASS r-09.flex.json 落盘并含树指纹与探索产物清单\n' "$idx"
 else
-  idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL flex 审计未落盘\n' "$idx"
+  idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL flex 审计未落盘或缺字段\n' "$idx"
+fi
+# gate_version 必须是可读的 skill 版本，而不是占位符
+if grep -q '"gate_version": "autopilot 0\.9' "$TMP/.autopilot/rounds/r-09.flex.json"; then
+  idx=$((idx + 1)); printf 'RESULT S%s PASS gate_version 带 skill 版本号\n' "$idx"
+else
+  idx=$((idx + 1)); fails=$((fails + 1)); printf 'RESULT S%s FAIL gate_version 不是 skill 版本号\n' "$idx"
 fi
 
 # 配置收紧生效、放宽被忽略

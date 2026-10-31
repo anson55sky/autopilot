@@ -203,3 +203,23 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
     `AUTOPILOT_NO_CAPS` 可伪造缺失；GOAL 模板与 `specs/craft.md` §6 写明键名与两种自动 SKIP 方式。
   - 验证：xref 6/6、10 个自测全绿（environ 自测 9→12 例）、元验收 11/11（M1 用试点仓真样本，
     17 项稳定一致）、cmd_smoke 41/41、privacy FAIL 0 / PS3 SKIP（未给词表）、迁移彩排 16/16。
+- 2026-10-31 **P0-b 试点（WavePeek 新项目）暴露的 4 处闸门/账本静默缺陷，版本 `0.9.3-detour`**。
+  共同特征：**判定脚本自身不报错，只是安静地少记/记错**；任何一次真实长跑都会踩到。
+  - **F-1 `flex-gate.sh spend --new-round` 吞掉本轮第一次 flex 计数。** 重置写在自增之后，
+    实测 `light_used` 停在 0；上限 2 时实际可放行 3 次。现在先重置、再自增，并同时写 `round`；
+    `flex-gate.selftest.sh` 新增 S28 钉死 `--new-round` 后 `light_used == 1`。
+  - **F-2 审计缺字段 + 版本号写死。** `specs/flex-gate.md` 要求 `r-XX.flex.json` 带
+    `artifacts` / `proposals` / `hypo_checks` 与真实 `gate_version`，实现只写树指纹且版本恒为
+    `0.9.0-dev`。现在三项字段照写，`gate_version` 从协议文档的 `version:` 读（`SKILL.md` 与草稿仓的
+    `02-SKILL-0.9.md` 都认；读不到退化 `autopilot unknown`）；S29 与扩写的 S26 拦住回退。
+    第一版只认 `SKILL.md`，在草稿仓里 S27 立刻报 FAIL —— 这正是自测该干的事。
+  - **F-3 账本读错文件名。** `status.py` 读 `gatem.jsonl`，生产者写的是 `gate.jsonl`（规格也写
+    `gate.jsonl`）；`status.selftest.sh` 又恰好伪造了同一个错名字，所以自测一直绿。
+    后果：每轮 metrics 的 `decisions*` 恒为 0。现在改读 `gate.jsonl`，自测改用**生产者真实行格式**
+    （`decision: allow` + `mode: flex-light`）落在真实 `sandbox/.gate/`。
+  - **F-4 决策归类与占比口径错。** `classify_decision` 在第一个认不出的键（`decision: allow`）
+    就提前返回 `other`，永远读不到 `mode`；且 `flex_usage_rate` 优先用「flex 决策 ÷ 决策流总数」，
+    只有 flex 流量时算出 100%。现在多键扫描（deny > flex > heavy > light），占比优先
+    「flex 调用 ÷ 本轮总调用」（A3 的预算口径）；自测新增 `flex_decisions == 1` 断言。
+  - 验证：`flex-gate.selftest.sh` 29/29、`status.selftest.sh` 7/7；WavePeek 工作区实测
+    `read_gate` 读到 3 条决策（全部 flex），`flex_usage_rate = 1/11 = 9.09%`。
