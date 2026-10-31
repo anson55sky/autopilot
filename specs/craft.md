@@ -235,8 +235,10 @@
 
 1. **先落成 A# 再 freeze。** 门禁不是「额外的软建议」，一旦启用就是验收项；
    冻结之后不得新增或放宽（铁律 1）。
-2. **工具缺失 → SKIP，不是 FAIL**（B3）。`environment.json` 里没有对应工具时，
+2. **工具缺失 → SKIP，不是 FAIL**（B3）。`environment.json` 的 `capabilities.crapper` /
+   `capabilities.dryer` / `capabilities.mutator`（能力键即工具名）为 null 时，
    相关 A# 输出 `RESULT <A#> SKIP "capability:<tool> absent"`，REPORT 的 SKIP 清单里单列。
+   自动产出方式：`.autopilot/acceptance-needs.json` 里映射 A#→能力键，或 `run.sh` 里用 `need`。
 3. **语言覆盖有限，必须显式声明。** 上述三个上游工具（截至 2026-10）只支持
    Clojure / Java / Go / TypeScript / Rust / Python。**Swift 与 Objective-C 不在其中。**
    对不支持的语言，相关 A# 一律 SKIP —— **不允许**用「跳过」冒充「通过」。

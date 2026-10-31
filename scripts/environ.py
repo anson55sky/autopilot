@@ -29,6 +29,12 @@ MANIFEST 行格式：`<64hex><两空格><相对路径>`（相对路径带 `./` �
 浏览器探测：只查 PATH 与候选目录里的 chromium|chrome|google-chrome|msedge
 （外加 chromium-browser / google-chrome-stable 别名），能拿到 `--version` 输出即算可用；
 不启动 GUI，不打开窗口，超时 3 秒放弃。宁可 null 也不假绿。
+
+质量门禁工具（crapper / dryer / mutator）只查 PATH 上有没有可执行文件，不执行、不编译。
+它们只有在 GOAL.md 的「质量门禁」区块启用时才有意义，未启用时探测到也不改变判定。
+
+acceptance-needs.json 的 `_` 前缀键是注释（含 _example / _capability_keys），
+判定时整键忽略 —— 否则脚手架自带的说明文字会被当成 A# 造出假 SKIP。
 """
 
 import argparse
@@ -46,8 +52,9 @@ E_OK, E_SKIP, E_USAGE, E_INTERNAL = 0, 40, 2, 3
 BROWSER_NAMES = ("chromium", "chromium-browser", "chrome", "google-chrome",
                  "google-chrome-stable", "msedge", "microsoft-edge")
 AUDIO_NAMES = ("afplay", "aplay", "paplay", "pw-play")  # 只查存在，不真播
+QUALITY_TOOLS = ("crapper", "dryer", "mutator")  # 外部可选依赖，只查存在，不执行
 CAPABILITIES = ("browser", "audio", "network", "container", "device", "paid-api",
-                "hash", "python", "shell")
+                "hash", "python", "shell", "crapper", "dryer", "mutator")
 HASH_IMPL_ORDER = ("shasum", "sha256sum", "python")
 HASH_ALIASES = {"shasum": "shasum", "sha256sum": "sha256sum",
                 "python": "python", "python-hashlib": "python", "hashlib": "python"}
@@ -319,14 +326,33 @@ def detect_paid_api():
     return True
 
 
+def detect_quality_tool(name):
+    """外部质量门禁工具：只查 PATH，不执行（执行成本与副作用都不可控）。"""
+    if env_set("AUTOPILOT_NO_CAPS") and name in env_list("AUTOPILOT_NO_CAPS"):
+        return None
+    return name if shutil.which(name) else None
+
+
 def compute_skipped(repo, caps, checks_dir):
-    """把 acceptance-needs.json 的 {A#: [cap,...]} 与当前能力交叉，缺哪个 → SKIP 哪个。"""
-    needs = read_json(os.path.join(repo, ".autopilot", "acceptance-needs.json"), {}) or {}
+    """把 acceptance-needs.json 的 {A#: [cap,...]} 与当前能力交叉，缺哪个 → SKIP 哪个。
+
+    `_` 前缀键是注释（模板自带的 _README / _capability_keys / _example），整键忽略。
+    返回值第三项是真实 A# 条目数，供 probe 行输出 needs=<N>。
+    """
+    needs_path = os.path.join(repo, ".autopilot", "acceptance-needs.json")
+    raw = read_json(needs_path, None)
     skipped = {}
-    hint = None
+    if raw is None:
+        return skipped, (".autopilot/acceptance-needs.json 不存在或不是合法 JSON → "
+                         "skipped_acceptance 输出空映射；" \
+                         "跑一次 init.sh（或 init.sh --probe-only）可补脚手架"), 0
+    if not isinstance(raw, dict):
+        return skipped, ("acceptance-needs.json 顶层必须是对象 {A#: [能力,...]} → "
+                         "skipped_acceptance 输出空映射"), 0
+    needs = {k: v for k, v in raw.items() if not str(k).startswith("_")}
     if not needs:
-        hint = (".autopilot/acceptance-needs.json 不存在或为空 → "
-                "skipped_acceptance 输出空映射；请补齐 A#→能力映射以启用 SKIP 判定")
+        return skipped, ("acceptance-needs.json 存在但没有任何 A# 条目（`_` 开头的注释键被忽略）→ "
+                         "skipped_acceptance 输出空映射；请补齐 A#→能力映射以启用 SKIP 判定"), 0
     for aid, reqs in sorted(needs.items()):
         if isinstance(reqs, str):
             reqs = [reqs]
@@ -334,7 +360,7 @@ def compute_skipped(repo, caps, checks_dir):
             if not caps.get(cap):
                 skipped[aid] = f"{cap}: 不可用（{caps.get(cap)!r}）"
                 break
-    return skipped, hint
+    return skipped, None, len(needs)
 
 
 def build_environment(repo, checks_dir=None):
@@ -350,12 +376,16 @@ def build_environment(repo, checks_dir=None):
         "container": detect_container(),
         "device": detect_device(),
         "paid-api": detect_paid_api(),
+        "crapper": detect_quality_tool("crapper"),
+        "dryer": detect_quality_tool("dryer"),
+        "mutator": detect_quality_tool("mutator"),
     }
-    skipped, hint = compute_skipped(repo, caps, checks_dir)
+    skipped, hint, needs_total = compute_skipped(repo, caps, checks_dir)
     doc = {
         "schema_version": "0.9",
         "probed_at": utc_now(),
         "capabilities": caps,
+        "acceptance_needs": {"mapped": needs_total},
         "skipped_acceptance": skipped,
     }
     if hint:
@@ -383,6 +413,7 @@ def cmd_probe(args):
     rel_out = os.path.relpath(out, repo)
     print(f"ENV PROBE 0 {rel_out} hash_impl={doc['capabilities']['hash_impl']} "
           f"browser={doc['capabilities']['browser'] or 'null'} "
+          f"needs={doc['acceptance_needs']['mapped']} "
           f"skipped={len(doc['skipped_acceptance'])}")
     if doc.get("hint"):
         print(f"ENV NOTE 0 {doc['hint']}")

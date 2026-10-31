@@ -76,7 +76,7 @@ codex-cli 0.147.0
 
 ## 授权 3：切换线上技能目录（改你正在用的 autopilot 本体）
 
-**状态：✅ 已关闭 —— 2026-10-30 23:4x 已切到线上；2026-10-31 追加 F 组后线上版本 `0.9.1-detour`。**
+**状态：✅ 已关闭 —— 2026-10-30 23:4x 已切到线上；2026-10-31 追加 F 组与 P1 静默修复后线上版本 `0.9.2-detour`。**
 
 回滚命令（随时可用，一行）：
 
@@ -188,3 +188,18 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
   - **许可提醒**：上游仓库没有 LICENSE 文件（默认版权保留），`specs/craft.md` 只借思想、未逐字复制。
   - 验证：草稿仓与线上目录各跑一遍全量（xref / 10 个自测 / 元验收 / cmd_smoke / privacy / 迁移彩排），
     结果见下方验证记录。
+- 2026-10-31 **P1 静默失效修复，版本 `0.9.2-detour`**。三处都是「文档/模板承诺了，代码却没做」：
+  - **P1-1 `acceptance-needs.json` 从未被创建。** A#→能力映射只写在文档里，`init.sh` 两个分支
+    都不生成它；新建工作区的 `skipped_acceptance` 永远是空映射，缺能力的验收只能退化成 FAIL
+    或假绿。现在：新增 `templates/acceptance-needs.json`（注释与能力键清单一律 `_` 开头），
+    正常初始化与 `--probe-only` 迁移路径都补建（已存在则不覆盖）；`environ.py` 判定时整键忽略
+    `_` 前缀键，提示拆成「文件缺失」与「文件存在但没有 A# 条目」两种，`ENV PROBE` 行新增
+    `needs=<N>`，`environment.json` 新增 `acceptance_needs.mapped`。
+  - **P1-2 文档路径写错。** `02-SKILL-0.9.md` 说映射在 `checks/acceptance-needs.json`，实现读的是
+    `.autopilot/acceptance-needs.json` —— 若真按文档放进 `checks/`，每次改映射都会让 MANIFEST
+    漂移，M1 等价性直接失效。
+  - **P1-3 质量工具无法被判 SKIP。** F2 承诺「工具缺失 → SKIP」，但 `environment.json` 里没有
+    `crapper` / `dryer` / `mutator` 键。现在加同名能力键（只查 PATH 可执行，不执行、不编译），
+    `AUTOPILOT_NO_CAPS` 可伪造缺失；GOAL 模板与 `specs/craft.md` §6 写明键名与两种自动 SKIP 方式。
+  - 验证：xref 6/6、10 个自测全绿（environ 自测 9→12 例）、元验收 11/11（M1 用试点仓真样本，
+    17 项稳定一致）、cmd_smoke 41/41、privacy FAIL 0 / PS3 SKIP（未给词表）、迁移彩排 16/16。

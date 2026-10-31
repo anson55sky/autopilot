@@ -10,7 +10,7 @@ description: >-
   人类审美判断的任务。
 color: cyan
 emoji: 🛫
-version: 0.9.1-detour
+version: 0.9.2-detour
 ---
 
 # autopilot 0.9「detour」
@@ -112,7 +112,8 @@ while 未触发停止条件:
 ## 5. 判定的诚实化（0.9 核心）
 
 - **SKIP**：`RESULT <A#> SKIP <原因>`，不计 PASS 也不计 FAIL；全绿 = 无 FAIL 且无 SKIP。
-  能力探测由 `environ.py` 完成，映射写在 `checks/acceptance-needs.json`。
+  能力探测由 `environ.py` 完成，映射写在 `.autopilot/acceptance-needs.json`
+  （`init.sh` 会补空脚手架；`_` 开头的键是注释，判定时忽略）。
 - **环境声明**：REPORT 必须引用 `.autopilot/host.json` 与 `environment.json`，
   写明结论在什么宿主、什么能力下取得；缺 `intercept_permission` 必须出降级声明。
 - **契约 epoch**：矩阵变更走 `sandbox/proposals/CHANGE_PROPOSAL-*.md`（必附"原矩阵为何证明不了"的

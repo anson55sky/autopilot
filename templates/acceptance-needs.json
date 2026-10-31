@@ -1,0 +1,23 @@
+{
+  "_README": "A# → 能力映射：键是 checks/run.sh 里的验收编号，值是能力键数组（数组里的能力全部可用才算满足），缺任意一个就输出 RESULT <A#> SKIP。以下划线开头的键是注释，判定时整键忽略。改本文件不需要重新 freeze —— 它住在 .autopilot/ 而不是 checks/，不进 MANIFEST。",
+  "_capability_keys": [
+    "browser",
+    "audio",
+    "network",
+    "container",
+    "device",
+    "paid-api",
+    "hash",
+    "python",
+    "shell",
+    "crapper",
+    "dryer",
+    "mutator"
+  ],
+  "_capability_notes": "crapper / dryer / mutator 只在 GOAL.md 启用「质量门禁」时才需要映射。browser/audio/python/hash_impl 的值是字符串或 null；network/container/device/paid-api 默认 null，只有显式许可才算可用；crapper/dryer/mutator 只查 PATH 上有没有可执行文件。",
+  "_example": {
+    "A3": ["browser"],
+    "A7": ["device", "crapper"]
+  },
+  "_skip_semantics": "SKIP 既不是 PASS 也不是 FAIL，但「全绿」要求无 FAIL 且无 SKIP（B3）。缺能力被迫 SKIP 时必须写进 REPORT。"
+}

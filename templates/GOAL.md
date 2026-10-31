@@ -56,8 +56,11 @@ MANIFEST.sha256 字节不变。判定来源：冻结 run.sh（00-DECISIONS §6 �
 | 结构重复率 | <!-- on / 留空=不启用 --> | < 0.82 | <!-- dryer --> |  |
 | 变异测试 | <!-- on / 留空=不启用 --> | 0 存活 / 0 未覆盖 | <!-- mutator --> |  |
 
-- 工具是**外部可选依赖**，不在本技能包内；`environment.json` 里没有对应工具时，
-  相关 A# 输出 `RESULT <A#> SKIP "capability:<tool> absent"` —— **SKIP 不是 PASS**（B3）。
+- 工具是**外部可选依赖**，不在本技能包内；`environment.json` 的 `capabilities.crapper` /
+  `capabilities.dryer` / `capabilities.mutator` 为 null 时，相关 A# 输出
+  `RESULT <A#> SKIP "capability:<tool> absent"` —— **SKIP 不是 PASS**（B3）。
+  要自动产出该 SKIP：在 `.autopilot/acceptance-needs.json` 里把对应 A# 映射到能力键，
+  或在 `run.sh` 里用 `need <A#> <能力键> "<描述>"`。能力键就是工具名本身。
 - 语言覆盖有限：上述工具（截至 2026-10）只支持 Clojure / Java / Go / TypeScript / Rust / Python。
   不支持的语言一律 SKIP，禁止用「跳过」冒充「通过」。
 - 门禁只加严、不放松；启用后 run 内不得关闭，要关走提案簿 + epoch（B2）。

@@ -190,6 +190,11 @@ EOF
 范围外发现只记在这里，不进本轮。
 EOF
   fi
+  # A#→能力映射：没有这份文件，overlay 只能给「空映射」提示，验收永远退化成 FAIL。
+  # 模板只带 _ 开头的注释键，判定层忽略它们，所以脚手架本身不会凭空造出 SKIP。
+  if [ ! -f "$AP/acceptance-needs.json" ] && [ -f "$TPL_DIR/acceptance-needs.json" ]; then
+    cp "$TPL_DIR/acceptance-needs.json" "$AP/acceptance-needs.json"
+  fi
 
   if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$REPO" rev-parse HEAD >"$AP/baseline/HEAD" 2>/dev/null || true
@@ -227,6 +232,10 @@ else
   "history": []
 }
 EOF
+  fi
+  # 迁移路径：老工作区没有 A#→能力映射时补一份空脚手架（不覆盖已有内容）。
+  if [ ! -f "$AP/acceptance-needs.json" ] && [ -f "$TPL_DIR/acceptance-needs.json" ]; then
+    cp "$TPL_DIR/acceptance-needs.json" "$AP/acceptance-needs.json"
   fi
 fi
 

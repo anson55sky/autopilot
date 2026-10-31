@@ -116,6 +116,52 @@ else
   bad "未打印 ENV SKIP 行：$out"
 fi
 
+# E9: `_` 开头键是注释，不许被当成 A# 造出假 SKIP，也不许压掉「有真实映射」的事实
+cat > "$AP/acceptance-needs.json" <<'EOF'
+{"_README": "注释", "_example": {"A1": ["browser"]}, "A99": ["browser"]}
+EOF
+env AUTOPILOT_NO_CAPS=browser sh "$ENVIRON" probe --repo "$TMP" >/dev/null 2>&1
+if python3 - "$AP/environment.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+skipped = d["skipped_acceptance"]
+assert list(skipped) == ["A99"], f"skipped 应只含 A99: {list(skipped)}"
+assert d["acceptance_needs"]["mapped"] == 1, f"mapped 应为 1: {d['acceptance_needs']}"
+assert "hint" not in d, f"有真实映射时不该出现补映射提示: {d.get('hint')}"
+PY
+then
+  ok "以 _ 开头的注释键被忽略，真实 A# 正常判定"
+else
+  bad "_ 注释键未忽略或 mapped/hint 判定错误"
+fi
+
+# E10: 文件缺失 vs 文件存在但没有 A# 条目 —— 提示必须能区分（否则用户不知道该建还是该填）
+rm -f "$AP/acceptance-needs.json"
+out_missing=$(e probe --repo "$TMP" 2>&1)
+printf '{}\n' > "$AP/acceptance-needs.json"
+out_empty=$(e probe --repo "$TMP" 2>&1)
+if printf '%s' "$out_missing" | grep -q '不存在或不是合法 JSON' \
+   && printf '%s' "$out_empty" | grep -q '没有任何 A# 条目'; then
+  ok "acceptance-needs.json 缺失与空映射的提示可区分"
+else
+  bad "缺失/空映射提示不可区分 :: missing=[$(printf '%s' "$out_missing" | tr '\n' ' ')] empty=[$(printf '%s' "$out_empty" | tr '\n' ' ')]"
+fi
+
+# E11: 质量门禁工具探测 —— PATH 上有可执行即记可用；AUTOPILOT_NO_CAPS 可伪造缺失
+QBIN="$TMP/qbin"
+mkdir -p "$QBIN"
+printf '#!/bin/sh\nexit 0\n' > "$QBIN/crapper"
+chmod +x "$QBIN/crapper"
+PATH="$QBIN:$PATH" sh "$ENVIRON" probe --repo "$TMP" >/dev/null 2>&1
+q_on=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["capabilities"].get("crapper"))' "$AP/environment.json" 2>/dev/null || printf 'ERR')
+PATH="$QBIN:$PATH" env AUTOPILOT_NO_CAPS=crapper sh "$ENVIRON" probe --repo "$TMP" >/dev/null 2>&1
+q_off=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["capabilities"].get("crapper"))' "$AP/environment.json" 2>/dev/null || printf 'ERR')
+if [ "$q_on" = "crapper" ] && [ "$q_off" = "None" ]; then
+  ok "crapper/dryer/mutator 探测生效，且可用 AUTOPILOT_NO_CAPS 伪造缺失"
+else
+  bad "质量工具探测不对 :: on=$q_on off=$q_off"
+fi
+
 printf '自检 %d 例，失败 %d\n' "$idx" "$fails"
 [ "$fails" = 0 ] || exit 1
 exit 0
