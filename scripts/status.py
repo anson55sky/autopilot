@@ -295,14 +295,14 @@ def metrics_record_path(ap, round_no):
 
 
 def list_round_records(ap):
-    """列出已有轮次记录（不含 metrics 文件）。"""
+    """列出已有轮次记录（只认 r-NN.json；同目录的 .flex.json / .metrics.json 不算）。"""
     out = []
     try:
         names = sorted(os.listdir(rounds_dir(ap)))
     except OSError:
         return out
     for name in names:
-        if not name.endswith(".json") or name.endswith(".metrics.json"):
+        if not re.fullmatch(r"r-\d+\.json", name):
             continue
         doc = load_json(os.path.join(rounds_dir(ap), name), None)
         if isinstance(doc, dict):
@@ -443,6 +443,8 @@ def flex_usage_rate(flex_delta, dec_flex_delta, dec_total_delta, calls, gate_tot
     if flex_delta is not None and gate_total_delta:
         return flex_delta / gate_total_delta, "flex 计数 %d ÷ 闸门总计数 %d（计数器可能互相重叠）" % (
             flex_delta, gate_total_delta)
+    if flex_delta == 0 and dec_total_delta == 0:
+        return None, "本轮 flex 调用与闸门决策均为 0（占比不适用）"
     return None, "没有可用分母（闸门决策流缺失且本轮调用数未知）"
 
 

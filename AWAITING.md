@@ -223,3 +223,15 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
     「flex 调用 ÷ 本轮总调用」（A3 的预算口径）；自测新增 `flex_decisions == 1` 断言。
   - 验证：`flex-gate.selftest.sh` 29/29、`status.selftest.sh` 7/7；WavePeek 工作区实测
     `read_gate` 读到 3 条决策（全部 flex），`flex_usage_rate = 1/11 = 9.09%`。
+- 2026-10-31 **P0-b 续：审计快照被当成轮次记录（F-5），版本 `0.9.4-detour`**。
+  在 WavePeek 合并 CP-001 后收第 2 轮时暴露：第 2 轮零 flex 调用，`metrics` 却把第 1 轮的
+  全部 flex 流量记在它头上（`light=1`、`decisions=3`、占比 100%）。
+  - **根因**：`status.py list_round_records()` 只排除 `*.metrics.json`，同目录的审计文件
+    `r-01.flex.json` 也被当成轮次记录；按文件名排序它先于 `r-01.json` 命中，
+    `latest_record_before()` 取到没有 `flex.cumulative` 的那份，增量基准丢失后退化成
+    「当前累计值即增量」。F-4 修好决策流读取后，这个错基准才显形。
+  - **修复**：只认规范名 `r-<数字>.json`（`re.fullmatch`），其余同目录 JSON 一律不算轮次记录。
+    `status.selftest.sh` 新增第 8 例：放一个 `r-01.flex.json` 再收第 2 轮，断言
+    `light/decisions` 增量为 0、累计 `light_used` 仍为 1；修复前该例 FAIL、修复后 8/8。
+  - **重算**：WavePeek `r-02` 按修复后的口径重收，`light=0`、`decisions=0`，占比退化为
+    `null`（本轮既无调用也无决策），与真实情况一致；r-01 指标不受影响。

@@ -266,6 +266,52 @@ sys.exit(0 if "flex" in f and f.get("flex") == 1 and f.get("decisions") == 1 and
 
 # ---------------------------------------------------------------- C5
 
+case_audit_not_record() {
+    repo=$(new_repo c8)
+    mkdir -p "$repo/.autopilot/rounds" "$repo/sandbox/.gate"
+    write_state "$repo/.autopilot/state.json" '"2026-01-01T07:00:00+08:00"'
+    cat > "$repo/sandbox/.gate/state.json" <<'EOF'
+{"light_used": 1, "heavy_used": 0, "flex_calls": 1}
+EOF
+    cat > "$repo/sandbox/.gate/gate.jsonl" <<'EOF'
+{"round": 1, "task": "t-1", "mode": "flex-light", "decision": "allow", "ts": "2026-01-01T08:00:00+08:00"}
+EOF
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 1}
+EOF
+    $PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-01.json" >/dev/null 2>&1
+    cat > "$repo/.autopilot/rounds/r-01.flex.json" <<'EOF'
+{"round": 1, "epoch": 0, "flex_used": {"light": 1, "heavy": 0, "calls": 1}, "artifacts": []}
+EOF
+    cat > "$repo/.autopilot/rounds/r-02.json" <<'EOF'
+{"round": 2, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-02.json" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 8 "审计文件在场时收轮退出码 $rc: $out"
+        return
+    fi
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+f = d.get("flex") or {}
+cum = f.get("cumulative") or {}
+sys.exit(0 if f.get("light") == 0 and f.get("decisions") == 0 and cum.get("light_used") == 1 else 1)' \
+        "$repo/.autopilot/rounds/r-02.json"; then
+        fail 8 "r-01.flex.json 被当成上一轮记录，第 2 轮 flex 增量算错"
+        return
+    fi
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+f = d.get("flex") or {}
+sys.exit(0 if f.get("usage_rate") is None and "均为 0" in (f.get("usage_rate_basis") or "") else 1)' \
+        "$repo/.autopilot/rounds/r-02.json"; then
+        fail 8 "第 2 轮无调用无决策时占比应记为不适用"
+        return
+    fi
+    pass 8 "r-01.flex.json 不算轮次记录（第 2 轮增量为 0、累计仍为 1）"
+}
+
 case_metrics() {
     repo=$(new_repo c7)
     mkdir -p "$repo/.autopilot/rounds"
@@ -300,6 +346,7 @@ case_empty
 case_aware
 case_close_twice
 case_flex_round
+case_audit_not_record
 case_metrics
 
 if [ "$FAILED" -gt 0 ]; then
