@@ -851,9 +851,14 @@ def cmd_log(root, payload):
 
 
 A_TOKEN_RE = re.compile(r"\bA\d{1,3}\b")
-# "出现过的编号"太宽：注释里写一句 A29 就会被算成有判定源。只认**发射位点**：
-# `RESULT A18 ...` 或引号里的 'A18'/"A18"（accept.mjs 与探针页都用这两种形态）。
-A_EMIT_RE = re.compile(r"(?:RESULT\s+(A\d{1,3})\b|['\"](A\d{1,3})['\"])")
+# "出现过的编号"太宽：注释里写一句 A29 就会被算成有判定源。只认**发射位点**三种形态：
+# ① `RESULT A18 ...`；② 引号里的 'A18'/"A18"（accept.mjs 与探针页都用这两种）；
+# ③ 引号里的 `A18:a18` 映射对——数据驱动的工装（run.sh 的探针组表）靠它自己迭代出 RESULT 行，
+#    不带引号或后面不是「:探针键」的注释提到一律不算。
+A_EMIT_RE = re.compile(
+    r"""(?:RESULT\s+(?P<res>A\d{1,3})\b"""
+    r"""|['"](?P<lit>A\d{1,3})['"]"""
+    r"""|['"](?P<map>A\d{1,3}):[A-Za-z][\w-]*['"])""")
 CHECK_EXTS = (".sh", ".mjs", ".js", ".py", ".html", ".txt", ".md", ".json")
 
 
@@ -877,8 +882,8 @@ def judging_sources(ap):
                 text = fh.read()
         except OSError:
             continue
-        for m1, m2 in A_EMIT_RE.findall(text):
-            found.add(m1 or m2)
+        for m in A_EMIT_RE.finditer(text):
+            found.add(m.group("res") or m.group("lit") or m.group("map"))
     return found, cdir
 
 

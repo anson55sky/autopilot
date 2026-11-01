@@ -188,6 +188,8 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 | --- | --- | --- | --- |
 | H39 | `scripts/intake.py draft/check/brief` + `init.sh --lite`：矩阵判定**只引用仓库里探测到的命令**，探测不到不编；推不出的条目在起草的 `checks/run.sh` 里走 `SKIP 待人工确认`；每条标来源（`user`/`probed`/`template`），非原话进 `intake.json.needs_human_confirm`；只替换 `## 验收矩阵` 表格行 + 追加 `## lite 声明`，其余小节一字不动；人写了矩阵或 `run.sh` 时退 **23** 不覆盖，`--force` 才重写；没有 GOAL.md 时退 **2** 指回入口，不自造第二套契约模板；`--lite` 与 `--probe-only` 互斥 | 脚本级（起草内容全部落盘可核；`intake check` 复核契约↔发射位点一致，错位退 24；没有 intake.json 时 check/brief 退 2，不越界判手写契约） | `intake.selftest.sh` A-in-01…15（20 项，含关闭态无 lite 痕迹、全 SKIP 不冒 PASS、可重放逐字节、非 lite 不越界） |
 | H39 配套 | `check.sh run` 判定收紧：`0 条真 PASS`（全 SKIP）从退 0 改为**退 1** 并打「本轮未完成」——lite 最危险的粉饰路径。方向是更严，不放松任何既有判定 | 脚本级（冻结通道） | `intake.selftest.sh` A-in-04c |
+| H38 补认① | 覆盖闸门认**带引号的 `A#:探针键` 映射对**为发射位点（数据驱动的工装靠这张表自己迭代出 RESULT 行）；裸写 `A9:`、注释里提编号仍不算；配套要求兜底数组名以 `_IDS` 结尾，WEAK 点名据此消失。方向是补认合法写法，不是放宽——漏判源照样退 24 | 脚本级（冻结门禁的识别面） | `status.selftest.sh` 例 15 新增 4c + ContraRunner 覆盖 29/47 → 47/47、实跑 47 行 RESULT（23 PASS / 15 FAIL / 9 SKIP） |
+
 | H39 收尾面 | `intake.py brief` 一屏结论页：第一行固定「我按下面这些标准判的，觉得不对你说」，逐条标来源与"待你确认"，无真 PASS 时明写未完成、有 FAIL/SKIP 时顶住「验收全绿」措辞；`round_prompt.sh` 仅在 `state.profile=lite` 时追加该要求（非 lite 输出逐字节不变） | 脚本级生成 + 提示词级强制；身份自报口径同 H3 | `intake.selftest.sh` A-in-09a/09b/13/15 |
 
 ---

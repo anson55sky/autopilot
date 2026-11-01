@@ -888,6 +888,25 @@ case_coverage_gate() {
         fail 15 "宽松匹配把注释当判定源了（rc=$rc）：$out"
     fi
 
+    # 4c) 数据驱动的工装：引号里的 `A#:探针键` 映射对就是判定源（run.sh 自己迭代出 RESULT 行）；
+    #     同样一句去掉引号，或冒号后面不是键名，就不认——判定源必须是机器真会读的那份表。
+    r5="$TMPROOT/h38mapping"; mkdir -p "$r5/.autopilot/checks"
+    printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| --- | --- | --- |\n| A1 | x | y |\n| A2 | y | z |\n| A3 | w | v |\n| A9 | 裸写 | u |\n' > "$r5/.autopilot/GOAL.md"
+    {
+        printf '#!/bin/sh\n'
+        printf 'EDITOR_IDS=("A2:probe_editor" "A3:probe_fps")\n'
+        printf 'printf "RESULT A1 PASS ok\\n"\n'
+        printf '# 以后补 A9（这里只是注释里裸写 A9: 不算）\n'
+    } > "$r5/.autopilot/checks/run.sh"
+    out=$($PY "$STATUS" coverage "$r5" 2>&1); rc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "缺判定源：A9" \
+       && ! printf '%s' "$out" | grep -q "缺判定源：.*A2" \
+       && printf '%s' "$out" | grep -q "命中 3 条"; then
+        pass 15 "带引号的 A#:探针键 映射对认作判定源（A2/A3 命中），裸写的 A9 仍被拦——只扩认表，不放宽口径"
+    else
+        fail 15 "映射对识别不对（rc=$rc）：$out"
+    fi
+
     # 5) 老工作区（GOAL 没有矩阵行）行为不变
     r2="$TMPROOT/h38legacy"; mkdir -p "$r2/.autopilot/checks"
     printf '# GOAL\n\n终结目标：做 X\n' > "$r2/.autopilot/GOAL.md"
