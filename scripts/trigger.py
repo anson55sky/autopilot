@@ -100,7 +100,8 @@ def count_ready(repo):
                     return n, "dag_scheduler plan 的 READY 行"
         except (OSError, subprocess.SubprocessError):
             pass
-    doc = load_json(os.path.join(ap_of(repo), "tasks.json"), {}) or {}
+    doc = (status_mod.load_json(os.path.join(ap_of(repo), "tasks.json"), {})
+           if status_mod else {}) or {}
     tasks = doc.get("tasks") if isinstance(doc, dict) else None
     done = {t.get("id") for t in (tasks or []) if isinstance(t, dict) and str(t.get("status")) in ("done", "closed")}
     n = 0
