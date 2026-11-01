@@ -192,6 +192,13 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 
 | H39 收尾面 | `intake.py brief` 一屏结论页：第一行固定「我按下面这些标准判的，觉得不对你说」，逐条标来源与"待你确认"，无真 PASS 时明写未完成、有 FAIL/SKIP 时顶住「验收全绿」措辞；`round_prompt.sh` 仅在 `state.profile=lite` 时追加该要求（非 lite 输出逐字节不变） | 脚本级生成 + 提示词级强制；身份自报口径同 H3 | `intake.selftest.sh` A-in-09a/09b/13/15 |
 
+
+**2.13 尺子闸门增补（0.9.7，2026-11-01，已实现并有自测）**
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H40 | `dag_scheduler.py start` 内置 `checks_edits()`：卡的写集里若有**盘上已存在**的 `.autopilot/checks/**` 文件 → 退 **24** 拒绝派发；checks/ 下尚不存在的新判定源（探针页）直接放行；改考卷须 `start --allow-checks-edit --note <理由>`（无 note 退 2），理由与文件清单写进 worker 账本事件的 `checks_edit` 字段 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；普通源码卡行为不变 | `dag-scheduler.selftest.sh` A-conc-14（8 项断言） |
+
 ---
 
 ## 3. 新增：预算隔离

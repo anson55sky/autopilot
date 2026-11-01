@@ -398,6 +398,26 @@ def _guard_enabled(cfg):
     return E_OK
 
 
+def checks_edits(repo, task):
+    """H40：这张卡的写集里，**盘上已存在**的判定文件（.autopilot/checks/**）。
+
+    分开两种情况才有意义：
+      - 新增判定源（例如给还没写的探针页）可以派工——它是把尺子接上，只会让漏判变少；
+      - 改写既有判定文件等于改考卷：工人一旦被允许动 run.sh / accept.mjs / MANIFEST，
+        "把 FAIL 改成 SKIP" 这类动作在结构上就没人拦得住（铁律「不改 checks/」的字面来源）。
+    所以后者必须由控制器/人显式放行并留下理由。判据看"文件在不在盘上"，不看路径写法，
+    免得用 ./ 或绝对路径绕开。
+    """
+    hits = []
+    for raw in (task.get("write_set") or []):
+        norm = str(raw).replace("\\", "/").lstrip("./")
+        if not norm.startswith(".autopilot/checks/"):
+            continue
+        if os.path.exists(os.path.join(os.path.abspath(repo), norm)):
+            hits.append(norm)
+    return hits
+
+
 def cmd_start(args):
     cfg = load_config(args.repo)
     rc = _guard_enabled(cfg)
@@ -454,6 +474,16 @@ def cmd_start(args):
             if clash:
                 print("CONFLICT %s 写集与运行中卡重叠: %s" % (args.task, ",".join(clash)))
                 return E_CONFLICT
+            edits = checks_edits(args.repo, task)
+            if edits and not args.allow_checks_edit:
+                print("STATE ERROR %s 写集里含**已冻结的判定文件**：%s —— "
+                      "新增判定源可以派工，改考卷不行。确实要改由控制器/人放行："
+                      "start --allow-checks-edit --note <为什么允许动尺子>"
+                      % (args.task, " ".join(edits)))
+                return E_STATE
+            if args.allow_checks_edit and not (args.note or "").strip():
+                print("用法 --allow-checks-edit 必须带 --note <理由>，理由要能审计")
+                return E_USAGE
             if len(running) >= cfg["limit"]:
                 print("BUDGET %s 并发已达上限 %d" % (args.task, cfg["limit"]))
                 return E_BUDGET
@@ -474,6 +504,7 @@ def cmd_start(args):
                 "concurrent": True, "round": cfg["round"],
                 "session": args.session or "",
                 "idempotent": task.get("idempotent"),
+                "checks_edit": edits if args.allow_checks_edit else [],
             }
             if args.allow_non_idempotent:
                 worker_event["human_release"] = args.note
@@ -652,6 +683,8 @@ def build_parser():
     s.add_argument("--allow-non-idempotent", dest="allow_non_idempotent",
                    action="store_true",
                    help="人工放行 idempotent=false 且已派过的卡（必须配 --note 理由）")
+    s.add_argument("--allow-checks-edit", dest="allow_checks_edit", action="store_true",
+                   help="放行「写集含已存在的判定文件」的卡（H40：改考卷必须显式理由并落账本）")
     s.set_defaults(fn=cmd_start)
 
     s = sub.add_parser("finish"); s.add_argument("--repo", required=True)

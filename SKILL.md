@@ -134,6 +134,10 @@ while 未触发停止条件:
   漂移退 **41** 并逐条打印 `RUNTIME DRIFT`。**漂移不自动改判定**（Chrome 自动更新是日常），
   但必须在 REPORT 声明"这批 RESULT 不是同一套工具链跑出来的"，不许当无事发生；
   工人改 PATH 或系统可执行文件会被 deny-list 拦（退 24 转待批）。
+- **`check.sh run` 的退出码（0.9.7 收紧）**：`0` 只在**至少一条真 PASS 且无 FAIL** 时给出；
+  全 SKIP（一条真 PASS 都没有）退 **1** 并打「本轮未完成」。SKIP 从来不算通过（B3），
+  但它以前能让退出码看起来是绿的——lite 档最容易踩这条路，所以把闸门本身改严。
+  判定内容仍只看 RESULT 行，`r-XX.passed` 也只从 RESULT 行来。
 - **契约 epoch**：矩阵变更走 `sandbox/proposals/CHANGE_PROPOSAL-*.md`（必附"原矩阵为何证明不了"的
   证据与影响面），**run 内不生效**；人批准后 `proposal-merge.sh merge` 归档旧基线、重冻、epoch+1。
   方向不对称：add/tighten 可自动合并；relax/remove 必须逐条带人工确认标记。
@@ -166,6 +170,12 @@ while 未触发停止条件:
 开关：`GOAL.md` 的 `## CONCURRENT` 区块写 `enable = true`；整节不填 = 关闭 = 串行基线
 （`round_prompt.sh` 输出与关闭前逐字节一致，A-conc-01 钉住）。关闭时
 `plan / status / start / finish / recover` 一律 **退出码 23**；`config` 只读，始终可用。
+
+**尺子闸门（H40，与开关无关，始终生效）**：`start` 会检查卡的写集里是否有**盘上已存在**的
+`.autopilot/checks/**` 文件——有就退 **24** 拒绝派发（新增判定源不在其列，那正是该派工的事）；
+确实要改考卷，由控制器/人显式 `start --allow-checks-edit --note <理由>`，理由与被动的文件清单
+写进 worker 账本事件，供事后审计。这条闸门存在的原因是铁律「不改 checks/」过去只写在文档里，
+没有任何机制能分辨一张卡的写集是不是判定文件——靠控制器脑子里的区分，换个执行者就会抄错。
 
 ```sh
 python3 $SKILL/scripts/dag_scheduler.py config  --repo $REPO --enabled
@@ -340,6 +350,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 并发派发后手改 `tasks.json` | 两个写者在同一文件上丢更新；状态与账本对不上 | 只经 `dag_scheduler.py start/finish/recover` 或 `status.py task set`（mkdir+PID 锁） |
 | 还原/回滚不落账（H11） | 事后无法区分"没动过"与"动过又还原"，冻结面漂移无从举证 | 当场 `status.py log` 一条 `type=revert`，带文件路径与还原前后 sha256 |
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
+| 把判定文件当普通源码派给工人（H40） | 被考核的人手里握着考卷：把 FAIL 改成 SKIP 在结构上无人可拦 | 新增判定源（checks/ 下还没有的文件）可派工；改既有判定文件必须 `start --allow-checks-edit --note <理由>`，文件清单与理由进 worker 账本事件 |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
 | lite 把自动起草的矩阵当用户已经批准的口径（H39） | 判定标准是机器猜的，却以「你要的做完了」交付 | `intake.json.needs_human_confirm` 逐条转给人；`intake.py brief` 的第一行必须是那句「觉得不对你说」；0 条真 PASS 时 `check.sh run` 退 1，结论页只许写「未完成」 |
 | 契约写了 47 条、checks 只声明 17 条就冻结（H38） | 缺口被冻进 MANIFEST，一路带到报告都没人红 | `check.sh freeze` 会拒（退 24）；确需分批冻结用 `status.py coverage --allow-partial`，理由进账本并在 REPORT 声明 |

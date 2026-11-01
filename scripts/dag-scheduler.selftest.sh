@@ -86,7 +86,8 @@ expect_not_contains() {
 # ---------------------------------------------------------------- A-conc-01 关闭态等价
 
 # A-conc-01 关闭态逐字节等价 + 关闭态统一退出码 23
-case_replay_determinism() {
+case_replay_determinism
+case_checks_edit_gate() {
     # H30：派发决策必须是纯函数 —— 同一 tasks.json 连跑 5 次，输出逐字节相同
     repo=$(new_repo a13)
     goal_on "$repo" 3
@@ -649,6 +650,53 @@ sys.exit(0 if t["status"] == "done" and t.get("closed_round") == 1 else 1)
 PY
     then pass 12 "finish done 写入 closed_round，供 close-round 对账"
     else fail 12 "done 没写 closed_round"; fi
+}
+
+# A-conc-14 判定文件写集闸门（H40：新增判定源可派工，改考卷必须显式放行）
+case_checks_edit_gate() {
+    repo=$(new_repo a14)
+    goal_on "$repo"
+    mkdir -p "$repo/.autopilot/checks"
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo/.autopilot/checks/run.sh"
+    printf '#!/bin/sh\n\n' > "$repo/.autopilot/checks/accept.sh"
+    write_tasks "$repo" <<EOF
+{"tasks": [
+ {"id": "T-61", "title": "T-61", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": [".autopilot/checks/run.sh"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-61.md"},
+ {"id": "T-62", "title": "T-62", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": [".autopilot/checks/probe-new.html"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-62.md"},
+ {"id": "T-63", "title": "T-63", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["./src/a.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-63.md"},
+ {"id": "T-64", "title": "T-64", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": [".autopilot/checks/accept.sh"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-64.md"}
+], "epoch": 0}
+EOF
+    "$PY" "$SCHED" start --repo "$repo" --task T-61 >"$TMPROOT/a14.block" 2>&1
+    expect_rc 14 24 "$?" "写集含已存在的判定文件（run.sh）→ 拒绝派发"
+    expect_contains 14 "$TMPROOT/a14.block" "改考卷" "拒绝理由要说清为什么这是改考卷"
+
+    "$PY" "$SCHED" start --repo "$repo" --task T-62 >"$TMPROOT/a14.new" 2>&1
+    expect_rc 14 0 "$?" "写集是 checks/ 下**还不存在**的新探针页 → 放行（新增判定源不是改考卷）"
+
+    "$PY" "$SCHED" start --repo "$repo" --task T-63 >"$TMPROOT/a14.src" 2>&1
+    expect_rc 14 0 "$?" "普通源码卡不受影响（关闭态不变）"
+
+    "$PY" "$SCHED" finish --repo "$repo" --task T-62 --status done >/dev/null 2>&1
+    "$PY" "$SCHED" start --repo "$repo" --task T-64 --allow-checks-edit >"$TMPROOT/a14.noflag" 2>&1
+    expect_rc 14 2 "$?" "放行开关必须带 --note 理由"
+
+    "$PY" "$SCHED" start --repo "$repo" --task T-64 --allow-checks-edit \
+        --note "控制器 2026-11-01 批准：accept.sh 的判定阈值需按契约 A1 收紧" >"$TMPROOT/a14.rel" 2>&1
+    expect_rc 14 0 "$?" "带理由的显式放行可以派"
+    if "$PY" - "$repo/.autopilot/ledger.jsonl" <<'PY'
+import json, sys
+ev = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+hit = [e for e in ev if e.get("task") == "T-64" and e.get("checks_edit")]
+miss = [e for e in ev if e.get("task") == "T-62" and e.get("checks_edit")]
+sys.exit(0 if len(hit) == 1 and "accept.sh" in hit[0]["checks_edit"] and not miss else 1)
+PY
+    then pass 14 "改尺子的事实进账本（checks_edit 列出被动的判定文件），新增探针页不污染该字段"
+    else fail 14 "checks_edit 留痕不对"; fi
 }
 
 case_disabled_equivalence
