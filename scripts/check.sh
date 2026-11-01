@@ -1,7 +1,8 @@
 #!/bin/sh
 # autopilot 验收门 0.9：冻结、校验、运行 check 脚本。
 # 用法: check.sh {freeze|verify|run} [repo]
-# 退出码: 0 全过（含仅有 SKIP 的情况，但会打警示）/ 1 有 FAIL
+# 退出码: 0 有真 PASS 且无 FAIL（存在 SKIP 时仍会打「不得宣称全绿」警示）
+#         / 1 有 FAIL，或 0 条真 PASS（全 SKIP 不算完成）
 #         / 2 用法或前置缺失 / 4 MANIFEST 漂移 / 5 锁等待超时（默认 120s）
 # 提示: run.sh 里若起无头浏览器，浏览器参数默认应含 --mute-audio
 #       （macOS 无头 Chrome 会把音效外放到扬声器）。
@@ -189,9 +190,11 @@ for r in results:
         print(f"  SKIP {r['id']} {r['note']}".rstrip())
 if skipped and not failed and code == 0:
     print(">>> 存在 SKIP，不得宣称全绿")
+if not passed:
+    print(">>> 没有任何一条真 PASS：本轮未完成（SKIP 与仅退出码都不算通过）")
 print(f"日志: {log}")
 
-sys.exit(0 if (code == 0 and not failed) else 1)
+sys.exit(0 if (code == 0 and not failed and passed) else 1)
 PY
     exit $?
     ;;

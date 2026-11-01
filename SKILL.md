@@ -10,7 +10,7 @@ description: >-
   人类审美判断的任务。
 color: cyan
 emoji: 🛫
-version: 0.9.6-detour
+version: 0.9.7-lite
 ---
 
 # autopilot 0.9「detour」
@@ -57,18 +57,29 @@ version: 0.9.6-detour
    能力索引，并写 `env.json` / `host.json` / `environment.json` / `sandbox/` 四件套。
    宿主能力矩阵默认按 `generic-cli` 降级；宿主提供会话原语时加 `--host <适配器名>`
    （或设 `AUTOPILOT_HOST`），适配器名查 `{SKILL_ROOT}/config/host-profiles.json`。
-2. **引导澄清问卷（E7）**：按 `{SKILL_ROOT}/templates/INTAKE-QUESTIONS.md` 生成，一次批量，
+2. **lite 档（H39，给不写验收矩阵的普通用户）**：`bash {SKILL_ROOT}/scripts/init.sh --goal "<一句话>" --repo <repo> --lite`
+   在标准初始化之后自动起草契约（`scripts/intake.py`），其余流程与本节完全相同——一个内核两套档位，
+   不是第二个技能。起草守四条（`intake.selftest.sh` A-in-01…15 共 20 项钉住）：
+   判定手段只引用**仓库里探测到**的命令（探测不到就一条也不编）；推不出的条目在 `checks/run.sh` 里
+   走 `SKIP 待人工确认`，**0 条真 PASS 时 `check.sh run` 退 1**；每条来源写进 `.autopilot/intake.json`
+   （`user` / `probed` / `template`），非原话的一律进 `needs_human_confirm`；只替换 GOAL 的
+   `## 验收矩阵` 表格行 + 追加 `## lite 声明`，其余小节一字不动。
+   收尾必须把 `python3 {SKILL_ROOT}/scripts/intake.py brief {REPO_ROOT}` 的一屏结论原样发给用户，
+   它第一行就是「我按下面这些标准判的，觉得不对你说」。矩阵一旦被起草就是契约：改判定标准要走提案 + 人批准。
+   人已经自己写了矩阵或 `checks/run.sh` 时，起草退 **23** 不覆盖（要重写须显式 `--force`）。
+3. **引导澄清问卷（E7）**：按 `{SKILL_ROOT}/templates/INTAKE-QUESTIONS.md` 生成，一次批量，
    硬顶 ≤5 问、影响性过滤、三类维度（交付物形态/完成口径/环境与红线），每问带
    为什么问 + 选项 + 推荐 + 不答的默认值。答与不答都写进 GOAL 的「澄清记录」。
    没跑问卷 = 全字段 defaulted，行为等价基线。
-3. 探测技术栈与能力：`discover.py` 的 roots 按五级优先级取（`--roots` >
+4. 探测技术栈与能力：`discover.py` 的 roots 按五级优先级取（`--roots` >
    `AUTOPILOT_SKILL_ROOTS` > `.autopilot/env.json` > 配置文件 > 空），
    未配置时明确报"未配置技能根目录"并列出配置入口，不静默假装空索引正常。
-4. 填 `GOAL.md`：交付物、验收矩阵（ID + 外部可观察检查 + 阈值）、质量门禁（可留空）、
+5. 填 `GOAL.md`：交付物、验收矩阵（ID + 外部可观察检查 + 阈值）、质量门禁（可留空）、
    非目标、边界、假设、预算、`FLEX_RULES`（可整段留空）、环境能力假设、澄清记录。
-5. 写 `checks/run.sh`（黑盒判定 + 能力探测 + SKIP 语义），`check.sh freeze` 冻结。
-6. 写 `CHARTER.md`、`SPEC.md`、`DESIGN.md`、`tasks.json`（过 `schema/check.py`）与任务卡。
-7. 估预算：调用数 ≈ 任务数 × 1.5 + 轮数 × 2。超预算先砍范围，不砍验收。
+   走 lite 档时验收矩阵已由第 2 步起草，本步只确认其余小节（要改矩阵就照第 2 步的规矩来）。
+6. 写 `checks/run.sh`（黑盒判定 + 能力探测 + SKIP 语义），`check.sh freeze` 冻结。
+7. 写 `CHARTER.md`、`SPEC.md`、`DESIGN.md`、`tasks.json`（过 `schema/check.py`）与任务卡。
+8. 估预算：调用数 ≈ 任务数 × 1.5 + 轮数 × 2。超预算先砍范围，不砍验收。
 
 ## 3. 角色与轨道
 
@@ -243,6 +254,9 @@ REPO={REPO_ROOT}
 
 bash $SKILL/scripts/init.sh --goal "目标" --repo $REPO
 bash $SKILL/scripts/init.sh --goal "目标" --repo $REPO --preset quickfix   # H22 不会写验收时选一档范式（quickfix|feature|longrun）
+bash $SKILL/scripts/init.sh --goal "一句话" --repo $REPO --lite           # H39 用户不写验收矩阵时用 lite（自动起草 + 强制声明）
+python3 $SKILL/scripts/intake.py check --repo $REPO                       # H39 复核：契约每条都有 RESULT 发射位点
+python3 $SKILL/scripts/intake.py brief --repo $REPO                       # H39 一屏结论页（lite 收尾必须原样发给用户）
 bash $SKILL/scripts/check.sh freeze $REPO
 python3 $SKILL/scripts/status.py coverage $REPO --allow-partial "<≥20 字理由>"   # H38 分批冻结（落账本，REPORT 须声明覆盖不完整）
 bash $SKILL/scripts/check.sh verify $REPO
@@ -326,6 +340,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 还原/回滚不落账（H11） | 事后无法区分"没动过"与"动过又还原"，冻结面漂移无从举证 | 当场 `status.py log` 一条 `type=revert`，带文件路径与还原前后 sha256 |
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
+| lite 把自动起草的矩阵当用户已经批准的口径（H39） | 判定标准是机器猜的，却以「你要的做完了」交付 | `intake.json.needs_human_confirm` 逐条转给人；`intake.py brief` 的第一行必须是那句「觉得不对你说」；0 条真 PASS 时 `check.sh run` 退 1，结论页只许写「未完成」 |
 | 契约写了 47 条、checks 只声明 17 条就冻结（H38） | 缺口被冻进 MANIFEST，一路带到报告都没人红 | `check.sh freeze` 会拒（退 24）；确需分批冻结用 `status.py coverage --allow-partial`，理由进账本并在 REPORT 声明 |
 | 未覆盖的验收项当已完成（H37） | 冻结通道少列一个 id 就永远不会红——假绿里最隐蔽的一种 | `close-round`/`phase report` 会拒（退 24）：补 RESULT 判定、给 SKIP 理由，或按事实改 verdict；给 checks 加 id 属契约动作，走提案 + 重冻 |
 | 多分支对比的胜出方案直接当验收通过（H35） | 探索产物污染判定，等价于自评自验 | `flexbranch.py pick` 只写 `sandbox/proposals/BRANCH_PICK-*.md`，须 merge 批准 + epoch+1 才生效；只有 Verifier 能定选择（退 31 剥夺） |
@@ -337,6 +352,9 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 
 - 适合：有明确交付物、能被机器判定的开发任务（新功能、克隆、重构、修 bug、批量修复、迁移）。
 - 适合长跑：验收矩阵能写出来、可重复执行的大工程。
+- 不会写验收矩阵的人：用 lite 档（`init.sh --lite`，H39）。它把一句话起草成契约，代价是判定口径由机器
+  代拟、需人事后确认；探测不到任何判定手段时，它只会输出全 SKIP 并退 1（等于承认"没做完"），
+  这种任务请回到标准档先把口径谈清楚。
 - 不适合：目标无法判定（「让它更好看」）——先用探索先行模式把口径变成可判定；
   需要频繁人类审美拍板的任务。
 - 跨平台承诺：macOS / Linux / WSL；Windows 原生不承诺（未验证）。详见 `dist/cross-platform.md`。

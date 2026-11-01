@@ -378,6 +378,11 @@ def render(g):
     out = ["== 接续包 ==", f"仓库:   {g['root']}"]
     out.append(f"目标:   {goal}")
     out.append(f"模式:   {state.get('mode', 'auto')}   阶段: {state.get('phase', 'intake')}")
+    # H39：只有 lite 起草的工作区才多这一行，标准档的接续包与旧版一字不差。
+    if state.get("profile") == "lite":
+        out.append("档位:   lite（契约由 intake.py 起草）→ 收尾必须发 "
+                   "python3 {SKILL_ROOT}/scripts/intake.py brief {REPO_ROOT} 的一屏结论，"
+                   "intake.json 的 needs_human_confirm 要逐条转给人")
     out.append(f"预算:   轮 {state.get('rounds_used', 0)}/{budget.get('max_rounds') or '-'}"
                f" · 调用 {g['calls']}/{budget.get('max_calls') or '-'}")
     # 只在配了这两档上限时才多写，否则接续包与旧版一字不差

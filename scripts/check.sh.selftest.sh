@@ -116,8 +116,9 @@ else
   bad 9 "陈旧锁抢占异常：rc=$rc（期望 0 且打印警告）"
 fi
 
-# C10 假 run.sh 输出 SKIP → 退出 0，skipped 含 A9，stdout 有警示行
+# C10 混合结果：有真 PASS 也有 SKIP → 退出 0，skipped 含 A9，stdout 有警示行
 write_runsh '#!/bin/sh
+echo "RESULT A8 PASS - 有一条真过的"
 echo "RESULT A9 SKIP - 浏览器不可用"
 exit 0
 '
@@ -126,9 +127,24 @@ sh "$CHECK" run "$REPO" >"$T/run4.out" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q '"A9"' "$CH/last-result.json" \
    && grep -q '>>> 存在 SKIP，不得宣称全绿' "$T/run4.out"; then
-  ok 10 "SKIP：退出 0，skipped 含 A9，警示行在 stdout"
+  ok 10 "SKIP：有真 PASS 时退出 0，skipped 含 A9，警示行在 stdout"
 else
   bad 10 "SKIP 场景异常：rc=$rc（期望 0 + skipped[A9] + 警示行）"
+fi
+
+# C17 0 条真 PASS（全是 SKIP）→ 退出 1 并明写未完成（H39：lite 起草不出判据时不许粉饰）
+write_runsh '#!/bin/sh
+echo "RESULT A9 SKIP - 自动起草时探测不到判定手段"
+exit 0
+'
+sh "$CHECK" freeze "$REPO" >/dev/null 2>&1
+sh "$CHECK" run "$REPO" >"$T/run4b.out" 2>&1
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q '>>> 没有任何一条真 PASS' "$T/run4b.out" \
+   && python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if not d["passed"] and d["skipped"] else 1)' "$CH/last-result.json"; then
+  ok 17 "全 SKIP（0 条真 PASS）：退出 1 且明写「本轮未完成」，passed 里没有任何东西"
+else
+  bad 17 "全 SKIP 仍被当成成功：rc=$rc（期望 1 + 未完成行）"
 fi
 
 # C11 假 run.sh 输出 FAIL → 退出 1

@@ -41,6 +41,29 @@ autopilot 是一个**单目标自动开发控制器**：你只签一次"终结�
 
 ---
 
+## 一句话跑通（lite 档，H39）
+
+不会写验收矩阵就用这一条，其余流程与上面完全相同（同一个内核，不是第二个技能）：
+
+```sh
+# 1) 一句话立项：矩阵由 intake.py 从仓库里探测到的命令起草
+bash {SKILL_ROOT}/scripts/init.sh --goal "做一个带 index.html 的落地页" --repo {REPO_ROOT} --lite
+
+# 2) 冻结 + 跑（探测不到判据的条目会判 SKIP，0 条真 PASS 时 run 退 1 = 未完成）
+bash {SKILL_ROOT}/scripts/check.sh freeze {REPO_ROOT}
+bash {SKILL_ROOT}/scripts/check.sh run {REPO_ROOT}
+
+# 3) 一屏结论页 —— 第一行就写着「我按下面这些标准判的，觉得不对你说」
+python3 {SKILL_ROOT}/scripts/intake.py brief --repo {REPO_ROOT}
+```
+
+代价要讲明白：**判定标准是机器代你拟的**。`.autopilot/intake.json` 的 `needs_human_confirm`
+列出的就是「机器猜的口径」，看一眼、不对就改 GOAL 矩阵（改矩阵 = 契约变更，走提案 + 人批准）。
+仓库里探测不到任何验证命令时，lite 不会编一条出来 —— 它只会全 SKIP 然后如实说没做完，
+这种任务请回到下面的 5 分钟流程，自己把口径写清楚。
+
+---
+
 ## 5 分钟跑通
 
 ```sh

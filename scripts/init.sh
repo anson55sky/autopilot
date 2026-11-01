@@ -22,6 +22,7 @@ MAX_CALLS=120
 MAX_TOOL_CALLS=0
 MAX_USD=0
 PRESET=""
+LITE=0
 SKILL_ROOTS=""
 CONFIG=""
 HOST_NAME=""
@@ -45,6 +46,9 @@ usage() {
   --max-usd X        成本上限 USD（默认 0=不设；只认宿主上报 source=host 的 usage 事件，H23）
   --preset NAME      H22 起步档位：quickfix | feature | longrun。把该档的验收矩阵范式**追加**进
                      GOAL.md（见 templates/presets/README.md）。不加 = 不追加，产物与不带此参数逐字节一致
+  --lite             H39 lite 档（给不写验收矩阵的普通用户）：初始化后用 intake.py 从这一句话
+                     自动起草矩阵——判定手段只引用仓库里探测到的命令，探测不到的条目判 SKIP 并
+                     标为待人工确认。与 --probe-only 互斥。不加 = 完全不变（产物逐字节一致）
   --skill-roots LIST 技能根目录路径列表（POSIX 用 ":" 分隔），写进 .autopilot/env.json
   --config PATH      技能根目录配置文件（JSON），写进 .autopilot/env.json
   --host NAME        宿主适配器名（默认取 AUTOPILOT_HOST，缺失按 generic-cli 降级）
@@ -82,6 +86,7 @@ while [ $# -gt 0 ]; do
     --config)      [ $# -ge 2 ] || die "--config 缺参数"; CONFIG="$2"; shift 2 ;;
     --host)        [ $# -ge 2 ] || die "--host 缺参数"; HOST_NAME="$2"; HOST_SOURCE="cli"; shift 2 ;;
     --probe-only)  PROBE_ONLY=1; shift ;;
+    --lite)        LITE=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *)             if [ "$PROBE_ONLY" = 1 ] && [ "${1#-}" = "$1" ]; then
                      REPO="$1"; shift
@@ -99,6 +104,9 @@ case "$PRESET" in
   ""|quickfix|feature|longrun) ;;
   *) die "--preset 只能是 quickfix | feature | longrun（选型见 templates/presets/README.md）" ;;
 esac
+if [ "$LITE" = 1 ] && [ "$PROBE_ONLY" = 1 ]; then
+  die "--lite 与 --probe-only 互斥：lite 只在新建工作区时起草契约，重探环境不重写契约"
+fi
 case "$MODE" in
   build|fix|auto) ;;
   *) die "--mode 只能是 build|fix|auto" ;;
@@ -318,6 +326,7 @@ SKILL_ROOTS_RAW="$SKILL_ROOTS" CONFIG_PATH="$CONFIG" AUTOPILOT_HOME_DIR="$AUTOPI
 HASH_IMPL="$HASH_IMPL" OS_KIND="$OS_KIND" HOST_NAME="$HOST_NAME" HOST_SOURCE="$HOST_SOURCE" \
 HOST_PROFILES_PATH="$HOST_PROFILES" WRITE_WORKSPACE="$([ "$PROBE_ONLY" = 1 ] && printf 0 || printf 1)" \
 MIGRATED="$MIGRATED" PY_VER="$PY_VER" PRESET_NAME="$PRESET" \
+LITE_PROFILE="$([ "$LITE" = 1 ] && printf lite || printf none)" \
 python3 - <<'PY'
 import datetime, json, os, sys
 
@@ -408,6 +417,10 @@ if write_workspace:
     _musd = float(os.environ.get("MAX_USD", "0") or 0)
     if _musd:
         state["budget"]["max_usd"] = _musd
+    # H39 lite 档标记：只有 --lite 才写这一字段（不带 --lite 时 state.json 字节不变）。
+    # 下游（round_prompt / intake brief / 结论页）靠它决定要不要强制打印「我按这些标准判的」声明。
+    if os.environ.get("LITE_PROFILE", "") == "lite":
+        state["profile"] = "lite"
     with open(os.path.join(ap, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
@@ -585,6 +598,24 @@ else
   note "环境:   探测失败（可手动跑 environ.py probe --repo {REPO_ROOT}，不影响开工）"
 fi
 
+# --- H39 lite 档：把「一句话」起草成已可执行的契约 --------------------------
+# 只替换 GOAL.md 的验收矩阵行 + 写 checks/run.sh 与 intake.json，其余小节一字不动；
+# 放在占位化兜底之前，所以起草出来的内容同样不含本机绝对路径。
+if [ "$LITE" = 1 ]; then
+  INTAKE=""
+  for cand in "$SELF_DIR/intake.py" "$SKILL_ROOT/scripts/intake.py"; do
+    if [ -f "$cand" ]; then INTAKE="$cand"; break; fi
+  done
+  [ -n "$INTAKE" ] || die "找不到 intake.py（--lite 需要它，包不完整）"
+  if [ -n "$PRESET" ]; then
+    python3 "$INTAKE" draft --repo "$REPO" --goal "$GOAL" --preset "$PRESET" || \
+      note "lite 起草失败：GOAL.md 仍是模板形态，需手工填验收矩阵（不影响其余初始化）"
+  else
+    python3 "$INTAKE" draft --repo "$REPO" --goal "$GOAL" || \
+      note "lite 起草失败：GOAL.md 仍是模板形态，需手工填验收矩阵（不影响其余初始化）"
+  fi
+fi
+
 # --- 占位化兜底：生成物里不许出现本机绝对路径 -----------------------------
 AP="$AP" SKILL_ROOT_PATH="$SKILL_ROOT" REPO_PATH="$REPO" python3 - <<'PY'
 import os
@@ -633,12 +664,21 @@ note "宿主:   {REPO_ROOT}/.autopilot/host.json（5 原语能力矩阵；缺能
 note "探测:   {REPO_ROOT}/.autopilot/environment.json（本机能力；缺能力项验收走 SKIP）"
 note "沙箱:   {REPO_ROOT}/sandbox/（弹性轨道唯一可写区）"
 note ""
+if [ "$LITE" = 1 ]; then
+note "下一步（lite 档：矩阵已自动起草，控制器自己完成，不要问用户）:"
+note "  1. bash {SKILL_ROOT}/scripts/check.sh freeze {REPO_ROOT}"
+note "  2. 写 CHARTER.md / SPEC.md / DESIGN.md / tasks.json / 任务卡（矩阵不用填）"
+note "  3. 进入 do → verify → gap → replan 循环"
+note "  4. 收尾时必须把 python3 {SKILL_ROOT}/scripts/intake.py brief {REPO_ROOT}"
+note "     的一屏结论原样发给用户（第一行就写着「我按下面这些标准判的，觉得不对你说」）"
+else
 note "下一步（控制器自己完成，不要问用户）:"
 note "  1. 填 GOAL.md 的验收矩阵 / 非目标 / 边界 / 假设"
 note "  2. 写 checks/run.sh（每条验收一个 RESULT 行）"
 note "  3. bash {SKILL_ROOT}/scripts/check.sh freeze {REPO_ROOT}"
 note "  4. 写 CHARTER.md / SPEC.md / DESIGN.md / tasks.json / 任务卡"
 note "  5. 进入 do → verify → gap → replan 循环"
+fi
 note "  6. 本机没有合适技能时（不安装，只读参考）: python3 {SKILL_ROOT}/scripts/remote.py search {REPO_ROOT} \"关键词\""
 note ""
 note "长跑（新会话接着跑）:"

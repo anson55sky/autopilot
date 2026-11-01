@@ -27,6 +27,25 @@ Not a task runner, not a prompt library, not a SaaS dashboard, not an autonomous
 If the goal cannot be phrased as a machine-checkable statement, this is the wrong tool — use the
 explore-first mode to turn the criteria into something checkable, or don't automate it.
 
+## One-sentence start (lite profile, H39)
+
+For users who cannot write an acceptance matrix. Same kernel, same gates — not a second skill.
+
+```sh
+bash {SKILL_ROOT}/scripts/init.sh --goal "add a landing page with index.html" --repo {REPO_ROOT} --lite
+bash {SKILL_ROOT}/scripts/check.sh freeze {REPO_ROOT}
+bash {SKILL_ROOT}/scripts/check.sh run    {REPO_ROOT}
+python3 {SKILL_ROOT}/scripts/intake.py brief --repo {REPO_ROOT}   # the one-screen result page
+```
+
+`intake.py` drafts every verdict from commands it actually found in the repository
+(`package.json` scripts, pytest config, Makefile targets, a root `.html`). Anything it cannot
+observe is emitted as `RESULT <A#> SKIP …`, never as a pass, and a run with zero real PASS
+exits 1 ("not done"). Each row records its source (`user` / `probed` / `template`); everything
+not quoted from the user is listed in `.autopilot/intake.json → needs_human_confirm`.
+The price is honest to state: the acceptance bar was drafted on your behalf, so the conclusion
+page opens with "these are the standards I judged against — tell me if they're wrong".
+
 ## Five-minute start
 
 ```sh

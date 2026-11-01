@@ -473,6 +473,28 @@
   "完全无判定源 16 条 + 有断言但未纳数组 14 条"，已以 H38 输出为准更正。
   证据：`scripts/status.selftest.sh` 例 15（6 项断言）；`tools/e2e-smoke.sh` 22/22 与
   `tools/migration_rehearsal.sh` 16/16 在新闸门下仍然全绿（老流程不被打断）
+- **H39 lite 档：一句话 → 已可执行的契约（已实现）。** 起因是产品定位问题：0.9.6 的技能已经厚到
+  "普通用户不敢用"，而本意是"发一句话就能做完一个任务"。裁决是**一个内核两套档位**，
+  不拆第二个技能（拆了就违反 H28 单一实现源，两套护栏必然漂移）。
+  新模块 `scripts/intake.py`，入口 `init.sh --goal "…" --lite`：
+  ① 判定手段**只引用仓库里探测到的命令**（package.json scripts / pytest 配置 / Makefile 目标 /
+  根目录 html），探测不到就一条也不编；
+  ② 推不出的条目在起草的 `checks/run.sh` 里走 `SKIP 待人工确认`，配合本次把 `check.sh run`
+  改成 **0 条真 PASS 退 1**（原先全 SKIP 会以退出码 0 收场，正是 lite 最危险的粉饰路径）；
+  ③ 每条标来源（`user` / `probed` / `template`），非原话一律进 `intake.json.needs_human_confirm`；
+  ④ **只替换 GOAL 的 `## 验收矩阵` 表格行**并追加 `## lite 声明`，其余小节一字不动——lite 工作区
+  仍跑全部闸门，不存在第二套契约格式（模板缺失时退 2 指回 `init.sh --lite`，不自造模板）。
+  收尾面 `intake.py brief` 出一屏结论：第一行固定是「我按下面这些标准判的，觉得不对你说」，
+  逐条标来源与"待你确认"，无真 PASS 时明写未完成；`round_prompt.sh` 只在 `state.profile=lite`
+  时把这段要求追加进轮提示（非 lite 输出逐字节不变，A-in-13 钉住）。
+  人已经写了矩阵或 `checks/run.sh` 时起草退 **23** 不覆盖，`--force` 才重写；`--lite` 与
+  `--probe-only` 互斥（重探环境绝不重写契约）。判定口径没放松：SKIP 仍不算通过（B3/B4）、
+  冻结仍过 H38 覆盖闸门、改矩阵仍要走提案 + 人批准。
+  风险如实声明：lite 把"写验收标准"这件原本由人做的事代做了，判定口径由机器代拟，
+  所以 `needs_human_confirm` 与那句结论页声明是它的安全带，不是装饰。
+  证据：`scripts/intake.selftest.sh` A-in-01…15（20 项断言，含关闭态无 lite 痕迹、探测不到全 SKIP、
+  全 SKIP 退 1、两类错位退 24、不覆盖人写契约、结论页措辞、可重放逐字节、原话里的双引号不打破 shell、
+  轮提示与接续包只在 lite 工作区多一段、非 lite 工作区 check/brief 退 2 不越界判别人的契约）
 
 #### H 组落地顺序（裁决后的排期，不是工期承诺）
 
@@ -496,6 +518,7 @@
 | 16 | ✅ 已完成（2026-11-01）：H34 审计导出 + H36 外部触发（`trigger.selftest.sh` 9 项）+ H35 多分支 flex（`flexbranch.selftest.sh` 9 项） | S / L / S | H9（时长口径）、宿主定时器 |
 | 17 | ✅ 已完成（2026-11-01）H37 判定覆盖闸门（由 ContraRunner 实测倒逼；`status.selftest.sh` 例 14 共 5 项） | S | 无 |
 | 18 | ✅ 已完成（2026-11-01）H38 冻结前覆盖闸门（`status.selftest.sh` 例 15 共 6 项；e2e 22/22 与迁移彩排 16/16 不受打断） | S | 无 |
+| 19 | ✅ 已完成（2026-11-01）H39 lite 档：`intake.py` 起草契约 + `init.sh --lite` 入口 + `brief` 一屏结论页（`intake.selftest.sh` 20 项）；顺带把 `check.sh run` 改成 0 条真 PASS 退 1 | M | 判定口径由机器代拟，靠 needs_human_confirm + 结论页声明兜底 |
 
 > 本组不产生任何 A#、不改变判定。表中每一项在实现时必须**自带关闭态逐字节等价测试**并补
 > `01-SPEC-0.9.md` 条目，否则不合入。

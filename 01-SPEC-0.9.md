@@ -178,6 +178,18 @@ flex 卡一律 `FLEX-SERIAL`，照旧走串行（G4）。`tasks.json` 是唯一�
 | H31 | GOAL 可选段 `## VERIFY_ACL`（缺省关）+ `scripts/verifier.py declare/check/audit`：没声明、声明属上一轮、档位不在只读白名单 → 退 24，结论不得写进 `r-XX.json`；宿主缺 `session_mode` 原语时退 0 但打 **DEGRADED** | 脚本级拦声明与口径；**档位强制性属宿主级**，无原语时只是自报（提示词级） | `verifier.selftest.sh` A-va-01…07（7 项，含关闭态提示词逐字节一致） |
 | H22 | `templates/presets/{quickfix,feature,longrun}.md` 三档验收矩阵范式 + `init.sh --preset`（**追加**进 GOAL.md，不带参数逐字节不变）+ `dist/README.en.md` 英文入口。附带修复：`{{EPOCH}}` 此前无人替换，每份生成的 GOAL.md 都留原文 | 脚本级（非法档位退 2）；范式只是脚手架，判定仍来自冻结 `run.sh` | `preset.selftest.sh` A-pz-01…06（6 项，含"模板每个占位符都有替换项"） |
 
+**2.12 lite 档增补（0.9.7，2026-11-01，已实现并有自测）**
+
+产品定位裁决：不拆第二个技能（拆包 = 两套护栏必然漂移，违反 H28 单一实现源），改为**一个内核两套档位**。
+lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP 仍不算通过（B3/B4）、冻结仍过 H38、
+改矩阵仍要提案 + 人批准。
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H39 | `scripts/intake.py draft/check/brief` + `init.sh --lite`：矩阵判定**只引用仓库里探测到的命令**，探测不到不编；推不出的条目在起草的 `checks/run.sh` 里走 `SKIP 待人工确认`；每条标来源（`user`/`probed`/`template`），非原话进 `intake.json.needs_human_confirm`；只替换 `## 验收矩阵` 表格行 + 追加 `## lite 声明`，其余小节一字不动；人写了矩阵或 `run.sh` 时退 **23** 不覆盖，`--force` 才重写；没有 GOAL.md 时退 **2** 指回入口，不自造第二套契约模板；`--lite` 与 `--probe-only` 互斥 | 脚本级（起草内容全部落盘可核；`intake check` 复核契约↔发射位点一致，错位退 24；没有 intake.json 时 check/brief 退 2，不越界判手写契约） | `intake.selftest.sh` A-in-01…15（20 项，含关闭态无 lite 痕迹、全 SKIP 不冒 PASS、可重放逐字节、非 lite 不越界） |
+| H39 配套 | `check.sh run` 判定收紧：`0 条真 PASS`（全 SKIP）从退 0 改为**退 1** 并打「本轮未完成」——lite 最危险的粉饰路径。方向是更严，不放松任何既有判定 | 脚本级（冻结通道） | `intake.selftest.sh` A-in-04c |
+| H39 收尾面 | `intake.py brief` 一屏结论页：第一行固定「我按下面这些标准判的，觉得不对你说」，逐条标来源与"待你确认"，无真 PASS 时明写未完成、有 FAIL/SKIP 时顶住「验收全绿」措辞；`round_prompt.sh` 仅在 `state.profile=lite` 时追加该要求（非 lite 输出逐字节不变） | 脚本级生成 + 提示词级强制；身份自报口径同 H3 | `intake.selftest.sh` A-in-09a/09b/13/15 |
+
 ---
 
 ## 3. 新增：预算隔离

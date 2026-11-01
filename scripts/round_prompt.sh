@@ -138,5 +138,44 @@ PY
   fi
 fi
 
+# H39：只在 state.json 的 profile=lite 时追加「一屏结论页」要求；非 lite 工作区输出逐字节不变。
+LITE_ON=$(python3 - "$REPO" <<'PY' 2>/dev/null || printf '0'
+import json, os, sys
+p = os.path.join(sys.argv[1], ".autopilot", "state.json")
+try:
+    print("1" if json.load(open(p, encoding="utf-8")).get("profile") == "lite" else "0")
+except (OSError, ValueError):
+    print("0")
+PY
+)
+if [ "$LITE_ON" = "1" ]; then
+  LITE_BLOCK=$(cat <<'EOF'
+lite 档收尾要求（state.profile=lite，H39）——补在第 8 步"结束"之前：
+
+1. 给用户看的必须是一屏结论，先取盘面真值，别凭印象写：
+   python3 {SKILL_ROOT}/scripts/intake.py brief {REPO_ROOT}
+2. brief 的第一行就是那句「我按下面这些标准判的，觉得不对你说」——不许改写、不许省略，
+   也不许在它后面补没有判定来源的好话。
+3. brief 里列了「待你确认」条目时必须原样转给用户，并说清这些不算通过；
+   一条真 PASS 都没有时只能写"未完成"，不许写"做完了 / 验收全绿"。
+4. 验收矩阵是 intake.py 从一句话起草的：要改判定标准 = 改契约，走提案 + 人批准，
+   工人不许自己放宽，也不许为了让结论好看把 SKIP 改成 PASS。
+EOF
+)
+  NEW_PROMPT=$(LITE_BLOCK="$LITE_BLOCK" PROMPT="$PROMPT" python3 - <<'PY'
+import os
+prompt = os.environ.get("PROMPT", "")
+block = os.environ.get("LITE_BLOCK", "")
+marker = "硬约束："
+if block and marker in prompt:
+    prompt = prompt.replace(marker, block + "\n\n" + marker, 1)
+print(prompt, end="")
+PY
+) || NEW_PROMPT=""
+  if [ -n "$NEW_PROMPT" ]; then
+    PROMPT="$NEW_PROMPT"
+  fi
+fi
+
 # 不做占位符展开：展开会把本机绝对路径写进提示词产物（换机即断，且违反 M6）。
 printf '%s\n' "$PROMPT"
