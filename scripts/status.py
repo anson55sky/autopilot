@@ -7,11 +7,18 @@
   status.py phase <root> <intake|plan|execute|verify|report>
   status.py close-round <root> <round.json>
   status.py metrics <root> [round]
+  status.py task <root> set <T-xx> <status> [--note S]   # P2：带锁单写者
+  status.py task <root> list [--json]
+  status.py pause [root] [--note 原因]                    # H9 时间账
+  status.py resume [root] [--note 原因]                   # H9 时间账
+  status.py budget <root> max_tool_calls=400 [max_usd=20]  # H8/H23，只准收紧或新设
 
 0.9 相对 0.8 的变化:
   C3 时间戳健壮：naive / 坏戳 / 空戳一律不崩，显示 unknown。
   C4 收轮幂等：close-round 可重复执行，flex 轮次也不会重复计数。
   C5 轮次指标：每次收轮写 rounds/r-XX.metrics.json。
+  H12 收轮对账：done 写 closed_round；`tasks_closed` 与记账对不上则退 24 且零写盘。
+  H9 时间账：pause/resume 只用于报告与量化，停止判定仍按墙钟（放宽需人工改 GOAL）。
 
 CLI 与 0.8 完全兼容（同样的子命令、同样的参数名），0.9 是它的超集。
 """
@@ -21,7 +28,9 @@ import datetime
 import json
 import os
 import re
+import shutil
 import sys
+import time
 
 UNKNOWN = "unknown"
 PHASES = ("intake", "plan", "execute", "verify", "report")
@@ -39,6 +48,16 @@ def now_iso():
     不能跟着墙上时钟漂。历史戳带本地偏移照样能读（parse_ts → astimezone）。
     """
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def to_float(value, default=None):
+    """宽容的浮点读取：坏值返回 default，不抛异常（与 to_int 同口径）。"""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def to_int(value, default=None):
@@ -141,12 +160,49 @@ def elapsed_minutes(stamp):
         return None
 
 
+def slept_minutes(events):
+    """H9：`pause`/`resume` 记账出来的"墙钟在走但没干活"分钟数。
+
+    没有这两类事件时返回 None —— 老工作区的口径与输出一个字都不变。
+    **停止判定仍然按墙钟**：本数字只用于报告和量化，要把判定改成活跃时长必须人工改 GOAL，
+    不允许控制器自己放宽（只准收紧或持平）。
+    """
+    total = 0.0
+    open_from = None
+    seen = False
+    for e in events or []:
+        if not isinstance(e, dict) or e.get("type") not in ("pause", "resume"):
+            continue
+        ts = parse_ts(e.get("ts"))
+        if ts is None:
+            continue
+        seen = True
+        if e["type"] == "pause":
+            if open_from is None:
+                open_from = ts
+        elif open_from is not None:
+            total += (ts - open_from).total_seconds()
+            open_from = None
+    if not seen:
+        return None
+    if open_from is not None:
+        total += (datetime.datetime.now(open_from.tzinfo) - open_from).total_seconds()
+    return int(total // 60)
+
+
 # ---------------------------------------------------------------- 账本
 
 def append_ledger(ap, event):
+    """单次 O_APPEND 写入：并发调度时多个工人在同一本账上追加也不会截断半行。"""
     event.setdefault("ts", now_iso())
-    with open(os.path.join(ap, "ledger.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    data = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(os.path.join(ap, "ledger.jsonl"),
+                 os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def read_ledger(ap):
@@ -183,6 +239,121 @@ def load_tasks(ap):
     doc = load_json(os.path.join(ap, "tasks.json"), {"tasks": []})
     tasks = doc.get("tasks", []) if isinstance(doc, dict) else []
     return tasks if isinstance(tasks, list) else []
+
+
+# ---------------------------------------------------------------- 任务状态单写者（P2）
+
+TASK_STATUSES = ("pending", "doing", "blocked", "done", "failed", "superseded")
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def acquire_state_lock(ap, timeout=None):
+    """tasks.json 的读改写锁。mkdir 原子 + PID + 陈旧抢占，与 check.sh 同款。"""
+    lock_dir = os.path.join(ap, "locks", "state.lock")
+    wait = timeout if timeout is not None else to_int(
+        os.environ.get("AUTOPILOT_STATE_LOCK_TIMEOUT"), 30) or 30
+    deadline = time.time() + max(1, wait)
+    while True:
+        try:
+            os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+            os.mkdir(lock_dir)
+            with open(os.path.join(lock_dir, "pid"), "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            return lambda: shutil.rmtree(lock_dir, ignore_errors=True)
+        except FileExistsError:
+            holder = None
+            try:
+                with open(os.path.join(lock_dir, "pid"), encoding="utf-8") as f:
+                    holder = to_int(f.read().strip(), 0) or None
+            except OSError:
+                holder = None
+            if holder and not _pid_alive(holder):
+                shutil.rmtree(lock_dir, ignore_errors=True)
+                continue
+            if time.time() >= deadline:
+                raise TimeoutError("状态锁等待超时（%ss，持有者 PID %s）" % (wait, holder or "?"))
+            time.sleep(0.1)
+
+
+def atomic_dump_json(path, data):
+    """与 dump_json 同格式（indent=2、不排序、无尾换行），但 tmp+replace 不撕裂。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def task_update(root, tid, status, note=None):
+    ap = os.path.join(root, ".autopilot")
+    if status not in TASK_STATUSES:
+        print("状态只能是: %s" % " / ".join(TASK_STATUSES))
+        return 2
+    release = acquire_state_lock(ap)
+    try:
+        path = os.path.join(ap, "tasks.json")
+        doc = load_json(path, None)
+        if not isinstance(doc, dict) or not isinstance(doc.get("tasks"), list):
+            print("读不到合法的 tasks.json: %s" % path)
+            return 2
+        tasks = doc["tasks"]
+        task = next((t for t in tasks if isinstance(t, dict) and t.get("id") == tid), None)
+        if task is None:
+            print("任务不存在: %s" % tid)
+            return 2
+        old = task.get("status", "pending")
+        if old == status:
+            print("TASK %s 已是 %s（跳过）" % (tid, status))
+            return 0
+        now = now_iso()
+        round_no = to_int((load_json(os.path.join(ap, "state.json"), {}) or {}).get("rounds_used"), 0) + 1
+        task["status"] = status
+        if status == "doing":
+            task.setdefault("started_at", now)
+        elif status in ("done", "failed"):
+            task["ended_at"] = now
+            if status == "failed":
+                task["attempts"] = to_int(task.get("attempts"), 0) + 1
+                if note:
+                    task["last_error"] = note
+            else:
+                task["closed_round"] = round_no
+        atomic_dump_json(path, doc)
+        event = {"type": "task", "actor": "status.py", "task": tid,
+                 "from": old, "status": status, "ts": now}
+        if note:
+            event["note"] = note
+        append_ledger(ap, event)
+    finally:
+        release()
+    print("TASK %s %s -> %s" % (tid, old, status))
+    return 0
+
+
+def task_list(root, as_json):
+    ap = os.path.join(root, ".autopilot")
+    tasks = load_tasks(ap)
+    rows = [{"id": t.get("id"), "status": t.get("status", "pending"),
+             "started_at": t.get("started_at"), "ended_at": t.get("ended_at"),
+             "dispatch_round": t.get("dispatch_round"),
+             "write_set": t.get("write_set") or []}
+            for t in tasks if isinstance(t, dict)]
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    for r in rows:
+        print("%s %s %s" % (r["id"], r["status"], ",".join(r["write_set"])))
+    return 0
 
 
 # ---------------------------------------------------------------- flex 闸门
@@ -528,6 +699,23 @@ def cmd_summary(root):
     max_rounds = to_int(budget.get("max_rounds"), 0) or 0
     max_minutes = to_int(budget.get("max_minutes"), 0) or 0
     max_calls = to_int(budget.get("max_calls"), 0) or 0
+    # H8/H23：工具调用数由本地账本可数；美元/token 只在**宿主上报**时参与判定
+    max_tool_calls = to_int(budget.get("max_tool_calls"), 0) or 0
+    max_usd = to_float(budget.get("max_usd"), 0.0) or 0.0
+    tool_calls = sum(1 for e in events if e.get("type") == "tool")
+    host_usd = 0.0
+    self_usd = 0.0
+    host_tokens = 0
+    for e in events:
+        if e.get("type") != "usage":
+            continue
+        v = to_float(e.get("usd"), None)
+        if e.get("source") == "host":
+            if v is not None:
+                host_usd += v
+            host_tokens += to_int(e.get("tokens"), 0) or 0
+        elif v is not None:
+            self_usd += v
     rounds = to_int(state.get("rounds_used"), 0) or 0
     streak = to_int(state.get("no_progress_streak"), 0) or 0
 
@@ -549,6 +737,10 @@ def cmd_summary(root):
         stops.append("时长预算耗尽")
     if max_calls and calls >= max_calls:
         stops.append("调用预算耗尽")
+    if max_tool_calls and tool_calls >= max_tool_calls:
+        stops.append("工具调用预算耗尽")
+    if max_usd and host_usd >= max_usd:
+        stops.append("宿主上报成本预算耗尽（USD）")
 
     goal = state.get("goal")
     goal_text = goal if isinstance(goal, str) else ("" if goal is None else str(goal))
@@ -570,6 +762,20 @@ def cmd_summary(root):
     print("轮次:   %s/%s   用时: %s/%s 分钟   调用: %s/%s"
           % (rounds, max_rounds or "-", fmt_num(elapsed), max_minutes or "-",
              calls, max_calls or "-"))
+    slept = slept_minutes(events)
+    if slept is not None and elapsed is not None:
+        print("时间账:  墙钟 %s 分钟 = 活跃 %s + 暂停/休眠 %s（H9；停止判定仍按墙钟，改口径需人工改 GOAL）"
+              % (elapsed, elapsed - slept, slept))
+    if max_tool_calls or max_usd:
+        parts = []
+        if max_tool_calls:
+            parts.append("工具调用 %s/%s" % (tool_calls, max_tool_calls))
+        if max_usd:
+            seg = "宿主上报 %.2f/%.2f USD" % (host_usd, max_usd)
+            if self_usd:
+                seg += " · 自估 %.2f（不参与判定）" % self_usd
+            parts.append(seg)
+        print("成本账:  %s" % " · ".join(parts))
     if tasks:
         parts = " · ".join("%s %s" % (k, v) for k, v in sorted(by_status.items()))
         print("任务:   %d/%d 完成   (%s)" % (by_status.get("done", 0), len(tasks), parts))
@@ -635,6 +841,90 @@ def cmd_phase(root, phase):
     state["phase"] = phase
     dump_json(path, state)
     print("阶段: %s" % phase)
+    return 0
+
+
+def cmd_budget(root, assignments):
+    """H8/H23：给长跑加/收紧预算维度。**只准设正数，不准设 0 或删档** ——
+    放宽预算属契约动作，必须由人在 state.json 上动手，不交给控制器自己放水。
+    """
+    ap = os.path.join(root, ".autopilot")
+    path = os.path.join(ap, "state.json")
+    if not os.path.isdir(ap):
+        print("没有 %s（先跑 init.sh）" % ap)
+        return 2
+    keys = {"max_tool_calls": to_int, "max_usd": to_float, "max_minutes": to_int,
+            "max_calls": to_int, "max_rounds": to_int, "max_tasks_per_round": to_int}
+    parsed = {}
+    for item in assignments:
+        if "=" not in item:
+            print("用法: status.py budget <root> max_tool_calls=400 [max_usd=20]")
+            return 2
+        k, v = item.split("=", 1)
+        k = k.strip()
+        if k not in keys:
+            print("BUDGET 未知维度 %s（可写：%s）" % (k, " / ".join(sorted(keys))))
+            return 2
+        val = keys[k](v.strip(), None)
+        if val is None or val <= 0:
+            print("BUDGET %s 必须是正数；**放宽或取消上限属契约变更，请人工改 state.json**" % k)
+            return 24
+        parsed[k] = val
+    try:
+        release = acquire_state_lock(ap)
+    except TimeoutError as exc:
+        print("LOCK TIMEOUT %s" % exc)
+        return 20
+    try:
+        state = load_json(path, {})
+        if not isinstance(state, dict):
+            print("读不到 %s" % path)
+            return 2
+        budget = state.get("budget") if isinstance(state.get("budget"), dict) else {}
+        for k, v in parsed.items():
+            old = keys[k](budget.get(k), None)
+            if old is not None and old > 0:
+                kept = min(old, v)
+                if kept != v:
+                    print("BUDGET %s 已有上限 %s，请求 %s 更宽 → 保留更严的 %s"
+                          % (k, old, v, kept))
+                budget[k] = kept
+            else:
+                budget[k] = v
+        state["budget"] = budget
+        atomic_dump_json(path, state)
+    finally:
+        release()
+    append_ledger(ap, {"type": "budget", "actor": "status.py", "requested": parsed,
+                       "applied": {k: budget.get(k) for k in sorted(parsed)}})
+    print("BUDGET 已更新: " + " ".join("%s=%s" % (k, budget.get(k)) for k in sorted(parsed)))
+    return 0
+
+
+def cmd_clock(root, kind, note):
+    """H9：把"墙钟在走但没干活"的时段记下来（pause / resume 配对）。
+
+    只用于报告与量化。停止条件仍然按墙钟算 —— 想按活跃时长判定，必须人工改 GOAL，
+    控制器不能自己把预算放宽（只准收紧或持平）。
+    """
+    ap = os.path.join(root, ".autopilot")
+    if not os.path.isdir(ap):
+        print("没有 %s（先跑 init.sh）" % ap)
+        return 2
+    last = None
+    for e in read_ledger(ap):
+        if isinstance(e, dict) and e.get("type") in ("pause", "resume"):
+            last = e.get("type")
+    if last == kind:
+        print("CLOCK 已经在 %s 状态，不重复记账" % kind)
+        return 0
+    if kind == "resume" and last != "pause":
+        print("CLOCK resume 之前没有未闭合的 pause（先跑 status.py pause）")
+        return 2
+    if kind == "pause" and last is None and note == "":
+        print("CLOCK pause 建议带 --note <原因>，便于事后量化")
+    append_ledger(ap, {"type": kind, "actor": "status.py", "note": note or ""})
+    print("CLOCK %s 已记账%s" % (kind, ("（%s）" % note) if note else ""))
     return 0
 
 
@@ -708,7 +998,16 @@ def cmd_close_round(root, round_path):
     metrics = {
         "round": round_no,
         "calls_used": calls,
+        # H8：工具调用数本地可数；成本只认宿主上报（source == "host"）
+        "tool_calls_used": sum(1 for e in events if e.get("type") == "tool"),
+        "host_reported_usd": sum(to_float(e.get("usd"), 0.0) or 0.0
+                                 for e in events
+                                 if e.get("type") == "usage" and e.get("source") == "host"),
         "elapsed_minutes": elapsed,
+        # H9：pause/resume 有记账时补活跃时长；没有就保持 None（口径与旧版完全一致）
+        "slept_minutes": slept_minutes(events),
+        "active_minutes": (elapsed - slept_minutes(events)
+                           if elapsed is not None and slept_minutes(events) is not None else None),
         "max_parallel": par,
         "rework_rate": rework,
         "flex_usage_rate": rate,
@@ -776,6 +1075,35 @@ def cmd_close_round(root, round_path):
     if round_no:
         metrics_rel = os.path.join("rounds", "r-%02d.metrics.json" % round_no)
         record["metrics_file"] = metrics_rel
+
+    # ---- H12 收轮一致性校验：声明的 tasks_closed 必须与 tasks.json 的记账对得上
+    #      只对"有记账字段"的工作区生效（closed_round 或 ended_at），老工作区一律跳过不误伤。
+    declared_closed = to_int(round_doc.get("tasks_closed"), 0) or 0
+    trackable = [t for t in tasks if isinstance(t, dict)
+                 and (t.get("closed_round") not in (None, "") or t.get("ended_at"))]
+    if trackable:
+        actual_closed, undecidable = 0, 0
+        for t in trackable:
+            if t.get("closed_round") not in (None, ""):
+                if to_int(t.get("closed_round"), 0) == round_no:
+                    actual_closed += 1
+                continue
+            ended = parse_ts(t.get("ended_at"))
+            if ended is None or start_dt is None:
+                undecidable += 1
+            elif ended >= start_dt:
+                actual_closed += 1
+        if undecidable:
+            print("CLOSE CHECK 跳过（%d 张卡只有 ended_at，且本轮起点未知，不做判定）" % undecidable)
+        elif actual_closed != declared_closed:
+            print("CLOSE CHECK 拒绝收轮: r-%02d.json 声明 tasks_closed=%d，"
+                  "但 tasks.json 本轮记账是 %d（依据 closed_round / ended_at 落在本轮窗口内）"
+                  % (round_no, declared_closed, actual_closed))
+            print("先对齐记账再收轮：确实关闭就走 status.py task set <T-xx> done，"
+                  "没关闭就把卡改回原状态；不要手改 tasks.json，也不要改轮次报告凑数")
+            return 24
+        else:
+            print("CLOSE CHECK 通过：本轮关闭 %d 个任务，与 tasks.json 记账一致" % actual_closed)
 
     # ---- 写轮次记录 + 指标
     if round_no:
@@ -918,6 +1246,24 @@ def build_parser():
     p_metrics = sub.add_parser("metrics", help="打印某轮指标（0.9 新增）")
     p_metrics.add_argument("root", help="仓库目录")
     p_metrics.add_argument("round", nargs="?", default=None, help="轮次号，缺省取最后一轮")
+
+    p_task = sub.add_parser("task", help="任务状态单写者（P2 并发，带锁更新 tasks.json）")
+    p_task.add_argument("root", help="仓库目录")
+    p_task.add_argument("action", choices=["set", "list"])
+    p_task.add_argument("id", nargs="?", default=None, help="任务 ID（set 必填）")
+    p_task.add_argument("status", nargs="?", default=None, help="目标状态（set 必填）")
+    p_task.add_argument("--note", default=None, help="写进 last_error 的说明（failed 时）")
+    p_task.add_argument("--json", action="store_true", help="list 输出 JSON")
+
+    for name, helptxt in (("pause", "开始一段不计工作的暂停（H9 时间账）"),
+                          ("resume", "结束暂停，回到工作状态（H9 时间账）")):
+        p = sub.add_parser(name, help=helptxt)
+        p.add_argument("root", nargs="?", default=os.getcwd(), help="仓库目录")
+        p.add_argument("--note", default="", help="原因，进账本")
+
+    p_budget = sub.add_parser("budget", help="加设/收紧多维预算（H8/H23，只准收紧）")
+    p_budget.add_argument("root", help="仓库目录")
+    p_budget.add_argument("assign", nargs=argparse.REMAINDER, help="max_tool_calls=400 [max_usd=20]")
     return parser
 
 
@@ -932,11 +1278,27 @@ def dispatch(args):
         return cmd_log(os.path.abspath(args.root), payload)
     if args.cmd == "phase":
         return cmd_phase(os.path.abspath(args.root), args.phase)
+    if args.cmd in ("pause", "resume"):
+        return cmd_clock(os.path.abspath(args.root), args.cmd, args.note)
+    if args.cmd == "budget":
+        return cmd_budget(os.path.abspath(args.root), list(args.assign or []))
     if args.cmd == "close-round":
         return cmd_close_round(os.path.abspath(args.root), args.round_json)
     if args.cmd == "metrics":
         return cmd_metrics(os.path.abspath(args.root), args.round)
-    print("用法: status.py <summary|log|phase|close-round|metrics> ...")
+    if args.cmd == "task":
+        root = os.path.abspath(args.root)
+        if args.action == "list":
+            return task_list(root, args.json)
+        if not args.id or not args.status:
+            print("用法: status.py task <root> set <T-xx> <status> [--note ...]")
+            return 2
+        try:
+            return task_update(root, args.id, args.status, args.note)
+        except TimeoutError as exc:
+            print("锁超时: %s" % exc, file=sys.stderr)
+            return 20
+    print("用法: status.py <summary|log|phase|close-round|metrics|task> ...")
     return 2
 
 

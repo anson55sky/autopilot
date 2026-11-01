@@ -14,6 +14,7 @@
 | `ask_human(question, options, recommend, timeout)` | 唯一人工触点 | 问题、选项、推荐、超时 | 选择或超时默认 | 超时默认 = 拒绝，不阻塞（铁律） |
 | `intercept_permission(session_id, request)` | 拦截执行器的高危动作请求 | 命令/工具请求 | `allow \| deny` | **必须**由 `flex-gate deny-list` 脚本级预检替代 |
 | `kill_session(session_id)` | 硬停跑飞的执行器 | id | 状态 | 只能等其自然结束；需在 REPORT 标注无硬停能力 |
+| `session_mode(tier)`（可选，第 6 个，H31） | 把某个会话限制在只读权限档位 | 档位名（如 `plan`） | 状态 | 验证者档位只是执行器**自报**：`verifier.py check` 退 0 但打 `DEGRADED`，REPORT 必须写降级声明；`degrade=block` 时直接拦住 |
 
 原语名是接口名，不是某个后端的 API 名。每个后端提供一份映射表即可。
 
@@ -25,6 +26,7 @@ await_turn             → wait_chat_sessions(sessionIds=[id], timeoutMs=0..6000
 ask_human              → respond_chat_session_interaction(type="userQuestion", indexedAnswers)
 intercept_permission   → 监督回调 type="permission" → respond_chat_session_interaction(decision=...)
 kill_session           → stop_chat_session(sessionId)
+session_mode           → Agent 调用的 mode 参数（plan / acceptEdits / default）；宿主未提供该项时按自报降级
 ```
 
 `templates/SUPERVISOR.md` 与 `SKILL.md` 长跑一节里出现的具体 API 名，一律改成引用本表的 adapter 术语，

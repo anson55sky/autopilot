@@ -132,6 +132,76 @@ git -C ~/.qoder-cn/skills/autopilot checkout v0.8-baseline -- . && git -C ~/.qod
 
 ---
 
+## 授权 4：P2 并发调度上线（0.9.6）
+
+**状态：已同步、已复验（2026-11-01 09:5x）。** 使用者在授权 4 提交后把全部自动化交给我，
+ContraRunner r-05 于 21:55 收轮（会话转 idle）后，我按本文「同步步骤」执行了 rsync，并在线上目录复验。
+
+- 同步方式：`rsync -a --exclude .git --exclude __pycache__ /tmp/autopilot-conc-096/ ~/.qoder-cn/skills/autopilot/`
+- 结果：线上 `SKILL.md` 版本 = `0.9.6-detour`；`diff -rq` 与草稿一致（仅多出 `.git`）；**无删除文件**；
+  同步前线上工作树干净（HEAD `f204f97`），回滚仍可用 `git checkout -- .`。未 commit、未 push。
+- 线上复验（全部通过）：10 套自测 rc=0（并发 69 项断言）、schema 自检 12/12、xref 6/6、
+  命令冒烟 53/53、端到端 22/22、元验收 11 PASS/0 FAIL/0 SKIP、迁移彩排 16/16、隐私扫描 FAIL 0、
+  关闭态 `round_prompt.sh` 与串行 golden 逐字节一致（sha256 `bf42b017bec7fea6…`）、
+  关闭态 `plan/status/recover` 均退 23。日志：`/tmp/autopilot-conc-096-verify/`。
+- ContraRunner 侧：`GOAL.md` 未加 `## CONCURRENT` 区块 → 仍走串行基线；r-05 后因时间预算耗尽停止，
+  报告 `.autopilot/REPORT-v2-r05.md`。是否在新 run 开启并发由你决定。
+
+### 开关与语义
+
+`GOAL.md` 的 `## CONCURRENT` 区块（模板已内置，默认 `enable = false`）：
+
+```
+enable                = false        # 整节不填或 false = 串行基线
+max_concurrent_builder = 3           # 与 state.budget.parallel 取更严者
+halt_policy           = wait-running # 本版唯一实现
+task_timeout_min      = 30           # 只记账，不杀工人
+```
+
+- **关闭 = 等价基线**：`round_prompt.sh` 输出与 `scripts/fixtures/round_prompt.round05.serial.golden`
+  逐字节一致（A-conc-01）；`dag_scheduler.py` 的 `plan/status/start/finish/recover` 统一退出码 23，
+  `config` 只读始终可用；`resume.py` 只在卡上有 `dispatch_round` 时多显示一行。
+- **开启只调度 strict 卡**：flex 卡显示 `FLEX-SERIAL`，不进调度器；`start` 对 flex 卡退 24。
+- **超时只记账**：`recover` 把超过 `task_timeout_min` 的 RUNNING 标 failed/stale，不杀工人；真 kill 只记 BACKLOG。
+- **单写者**：`tasks.json` 只经 `dag_scheduler.py start/finish/recover` 或 `status.py task set`
+  （mkdir+PID 锁，陈旧锁可抢占）；`ledger.jsonl` 改单次 `O_APPEND`+`fsync`。
+- 退出码：20 锁超时 / 21 槽位或并发上限 / 22 写集冲突 / 23 开关未启用 / 24 状态、依赖、epoch、Triage 不合法。
+
+### 本轮验证（草稿副本）
+
+| 套件 | 结果 |
+| --- | --- |
+| `scripts/dag-scheduler.selftest.sh`（新增 A-conc-01…10） | 69 项断言全过 |
+| 其余 9 套自测（check/environ/flex-gate/inbox/init-discover/migrate-tasks/proposal-merge/resume-round/status） | 全部 rc=0 |
+| `schema/check.py --self-test` | 12/12（新增 5 条 P2 字段正反例） |
+| 元验收 `meta-checks/run.sh`（用 0.8 样本 + 0.8 baseline） | 11 PASS / 0 FAIL / 0 SKIP |
+| 命令冒烟 `tools/cmd_smoke.sh` | 53/53 |
+| 端到端 `tools/e2e-smoke.sh` | 22/22 |
+| 迁移彩排 `tools/migration_rehearsal.sh` | 16/16 |
+| xref / privacy | FAIL 0（PS3 SKIP：未给词表） |
+
+### 变更文件（草稿内）
+
+新增：`scripts/dag_scheduler.py`、`scripts/dag-scheduler.selftest.sh`、
+`scripts/fixtures/round_prompt.round05.serial.golden`。
+修改：`scripts/status.py`（`task` 子命令 + 状态锁 + 原子写 + 单次 O_APPEND 账本）、
+`scripts/resume.py`（并发运行行，带字段才显示）、`scripts/round_prompt.sh`（开关开启才插入并发段）、
+`schema/tasks.schema.json` / `schema/check.py`（7 个可选运行字段）、`templates/GOAL.md`（CONCURRENT 区块）、
+`SKILL.md`（§7.1 + 命令 + 反模式）、`00-DECISIONS.md`（G 组）、`01-SPEC-0.9.md`（§2.8 + 非目标）、
+`tools/cmd_smoke.sh`（只对 dag_scheduler 的 20–24 语义退出码放行）、本文件。
+
+### 同步步骤（你确认后执行；不提交、不推送）
+
+```sh
+rsync -a --exclude .git --exclude __pycache__ /tmp/autopilot-conc-096/ ~/.qoder-cn/skills/autopilot/
+# 然后在线上目录把上面「本轮验证」整套再跑一遍；round_prompt 的 golden 必须仍然一致。
+```
+
+回滚：同步前线上目录有 git 历史，`git -C ~/.qoder-cn/skills/autopilot diff` 可核对；
+`git checkout -- .` 可整体撤回（同步动作本身不产生 commit）。
+
+---
+
 ## 记录
 
 - 2026-10-30 20:5x **两项均已裁决并执行完毕**：  - 授权 1 = **B**：已实跑。结论：**进程级驱动性 2/2 PASS**（claude 2.1.311 与 codex 0.147.0 均可被脚本

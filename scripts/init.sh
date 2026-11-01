@@ -19,6 +19,9 @@ MAX_TASKS=8
 PARALLEL=3
 BUDGET_MIN=240
 MAX_CALLS=120
+MAX_TOOL_CALLS=0
+MAX_USD=0
+PRESET=""
 SKILL_ROOTS=""
 CONFIG=""
 HOST_NAME=""
@@ -38,6 +41,10 @@ usage() {
   --parallel N       并行工人数（默认 3）
   --budget-min N     总时长上限，分钟（默认 240）
   --max-calls N      子代理调用上限（默认 120）
+  --max-tool-calls N 工具调用上限（默认 0=不设，H8；账本里 type=tool 的事件计数）
+  --max-usd X        成本上限 USD（默认 0=不设；只认宿主上报 source=host 的 usage 事件，H23）
+  --preset NAME      H22 起步档位：quickfix | feature | longrun。把该档的验收矩阵范式**追加**进
+                     GOAL.md（见 templates/presets/README.md）。不加 = 不追加，产物与不带此参数逐字节一致
   --skill-roots LIST 技能根目录路径列表（POSIX 用 ":" 分隔），写进 .autopilot/env.json
   --config PATH      技能根目录配置文件（JSON），写进 .autopilot/env.json
   --host NAME        宿主适配器名（默认取 AUTOPILOT_HOST，缺失按 generic-cli 降级）
@@ -68,6 +75,9 @@ while [ $# -gt 0 ]; do
     --parallel)    [ $# -ge 2 ] || die "--parallel 缺参数"; PARALLEL="$2"; shift 2 ;;
     --budget-min)  [ $# -ge 2 ] || die "--budget-min 缺参数"; BUDGET_MIN="$2"; shift 2 ;;
     --max-calls)   [ $# -ge 2 ] || die "--max-calls 缺参数"; MAX_CALLS="$2"; shift 2 ;;
+    --max-tool-calls) [ $# -ge 2 ] || die "--max-tool-calls 缺参数"; MAX_TOOL_CALLS="$2"; shift 2 ;;
+    --max-usd)     [ $# -ge 2 ] || die "--max-usd 缺参数"; MAX_USD="$2"; shift 2 ;;
+    --preset)      [ $# -ge 2 ] || die "--preset 缺参数"; PRESET="$2"; shift 2 ;;
     --skill-roots) [ $# -ge 2 ] || die "--skill-roots 缺参数"; SKILL_ROOTS="$2"; shift 2 ;;
     --config)      [ $# -ge 2 ] || die "--config 缺参数"; CONFIG="$2"; shift 2 ;;
     --host)        [ $# -ge 2 ] || die "--host 缺参数"; HOST_NAME="$2"; HOST_SOURCE="cli"; shift 2 ;;
@@ -85,6 +95,10 @@ if [ "$PROBE_ONLY" = 0 ]; then
   [ -n "$GOAL" ] || die '缺 --goal "终结目标"'
 fi
 [ -d "$REPO" ] || die "目录不存在: $REPO"
+case "$PRESET" in
+  ""|quickfix|feature|longrun) ;;
+  *) die "--preset 只能是 quickfix | feature | longrun（选型见 templates/presets/README.md）" ;;
+esac
 case "$MODE" in
   build|fix|auto) ;;
   *) die "--mode 只能是 build|fix|auto" ;;
@@ -298,11 +312,12 @@ HOST_PROFILES="$SKILL_ROOT/config/host-profiles.json"
 
 AP="$AP" TPL_DIR="$TPL_DIR" GOAL_TEXT="$GOAL" REPO_PATH="$REPO" \
 RUN_MODE="$MODE" MAX_ROUNDS="$MAX_ROUNDS" MAX_TASKS="$MAX_TASKS" PARALLEL="$PARALLEL" \
-BUDGET_MIN="$BUDGET_MIN" MAX_CALLS="$MAX_CALLS" SKILL_ROOT_PATH="$SKILL_ROOT" \
+BUDGET_MIN="$BUDGET_MIN" MAX_CALLS="$MAX_CALLS" \
+MAX_TOOL_CALLS="$MAX_TOOL_CALLS" MAX_USD="$MAX_USD" SKILL_ROOT_PATH="$SKILL_ROOT" \
 SKILL_ROOTS_RAW="$SKILL_ROOTS" CONFIG_PATH="$CONFIG" AUTOPILOT_HOME_DIR="$AUTOPILOT_HOME_DIR" \
 HASH_IMPL="$HASH_IMPL" OS_KIND="$OS_KIND" HOST_NAME="$HOST_NAME" HOST_SOURCE="$HOST_SOURCE" \
 HOST_PROFILES_PATH="$HOST_PROFILES" WRITE_WORKSPACE="$([ "$PROBE_ONLY" = 1 ] && printf 0 || printf 1)" \
-MIGRATED="$MIGRATED" PY_VER="$PY_VER" \
+MIGRATED="$MIGRATED" PY_VER="$PY_VER" PRESET_NAME="$PRESET" \
 python3 - <<'PY'
 import datetime, json, os, sys
 
@@ -332,6 +347,9 @@ if write_workspace:
         "{{BUDGET_MIN}}": os.environ["BUDGET_MIN"],
         "{{MAX_CALLS}}": os.environ["MAX_CALLS"],
         "{{DATE}}": now,
+        # 新 run 的契约 epoch 恒为 0（与下面写进 state.json 的 epoch 同源）；
+        # 以前这个占位符没人替换，生成的 GOAL.md 里会留一句 "{{EPOCH}}" 原文。
+        "{{EPOCH}}": "0",
     }
 
     tpl_path = os.path.join(os.environ["TPL_DIR"], "GOAL.md")
@@ -345,6 +363,22 @@ if write_workspace:
         tpl = tpl.replace(k, v)
     with open(os.path.join(ap, "GOAL.md"), "w", encoding="utf-8") as f:
         f.write(tpl)
+
+    # H22 起步档位：只追加范式，不动模板渲染结果——不带 --preset 时字节不变。
+    preset = os.environ.get("PRESET_NAME", "")
+    if preset:
+        p_path = os.path.join(os.environ["TPL_DIR"], "presets", preset + ".md")
+        try:
+            with open(p_path, encoding="utf-8") as f:
+                body = f.read()
+        except OSError:
+            print("错误: 读不到起步档位范式: " + p_path, file=sys.stderr)
+            sys.exit(2)
+        for k, v in repl.items():
+            body = body.replace(k, v)
+        with open(os.path.join(ap, "GOAL.md"), "a", encoding="utf-8") as f:
+            f.write("\n<!-- preset=%s（H22 起步范式；改它等于改契约，走提案 + 下一个 run 生效）-->\n\n" % preset)
+            f.write(body)
 
     state = {
         "schema": 2,
@@ -368,6 +402,12 @@ if write_workspace:
             "max_calls": int(os.environ["MAX_CALLS"]),
         },
     }
+    _mtc = int(os.environ.get("MAX_TOOL_CALLS", "0") or 0)
+    if _mtc:
+        state["budget"]["max_tool_calls"] = _mtc
+    _musd = float(os.environ.get("MAX_USD", "0") or 0)
+    if _musd:
+        state["budget"]["max_usd"] = _musd
     with open(os.path.join(ap, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 

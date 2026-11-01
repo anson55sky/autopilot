@@ -65,6 +65,21 @@ run_one() { # idx name cmd
     return
   fi
   if [ "$rc" -ge 3 ] || [ "$rc" -lt 0 ]; then
+    # dag_scheduler / toolgate 的 20–24（toolgate 再加 41）是文档写明的语义退出码
+    # （关闭态 23、写集冲突 22、不可逆 24、运行时漂移 41…），不是崩溃；
+    # 每一条语义都由各自的 selftest 另行钉住，这里不重复判。
+    case "$cmd" in
+      *dag_scheduler.py*|*toolgate.py*)
+        case "$rc" in
+          20|21|22|23|24) ok "$idx" "$name（语义退出码 $rc）"; return ;;
+        esac
+        ;;
+      *environ.py*)
+        case "$rc" in
+          40|41) ok "$idx" "$name（环境语义退出码 $rc）"; return ;;
+        esac
+        ;;
+    esac
     no "$idx" "$name" "退出码 $rc：$(head -1 "$out")"
     return
   fi

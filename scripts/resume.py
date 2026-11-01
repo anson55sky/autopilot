@@ -24,6 +24,14 @@ try:
     import playbook as pb_mod  # noqa: E402
 except ImportError:
     pb_mod = None
+try:
+    import status as st_mod    # noqa: E402  # 复用时间账与浮点读取，不另写一套（H28）
+except ImportError:
+    st_mod = None
+try:
+    import symbols as sym_mod  # noqa: E402  # H21 只读符号快照；没有快照样不打印
+except ImportError:
+    sym_mod = None
 
 _PB_LINE = re.compile(
     r"^- \[([a-z]+)\]\s*(.*?)(?:\s*\(x(\d+)(?:\s*·\s*(\d{4}-\d{2}-\d{2}))?\))?$")
@@ -91,6 +99,16 @@ def as_int(value, default=0):
     """状态文件被手改坏时也不崩：解析不了按默认值处理。"""
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def as_float(value, default=0.0):
+    """与 as_int 同口径：坏值按默认处理，不抛异常。"""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -210,6 +228,13 @@ def gather(root):
     events = read_ledger(ap)
     rounds = [e for e in events if e.get("type") == "round"]
     calls = sum(1 for e in events if e.get("type") in ("worker", "verifier"))
+    # H8/H9/H23：多维预算与时间账（无相应记账时全部为 0/None，输出一字不变）
+    tool_calls = sum(1 for e in events if e.get("type") == "tool")
+    host_usd = 0.0
+    if st_mod is not None:
+        for _e in events:
+            if _e.get("type") == "usage" and _e.get("source") == "host":
+                host_usd += st_mod.to_float(_e.get("usd"), 0.0) or 0.0
 
     done_ids = {t.get("id") for t in tasks if t.get("status") == "done"}
     ready = [t.get("id") for t in tasks
@@ -217,6 +242,22 @@ def gather(root):
              and all(d in done_ids for d in t.get("deps", []))]
     doing = [t.get("id") for t in tasks if t.get("status") == "doing"]
     blocked = [t.get("id") for t in tasks if t.get("status") in ("blocked", "paused")]
+    # 只有并发调度器写过的卡才有 dispatch_round；老工作区此列表恒空，输出不变。
+    running_conc = []
+    for t in tasks:
+        if not isinstance(t, dict) or t.get("status") != "doing":
+            continue
+        if t.get("dispatch_round") is None:
+            continue
+        started = parse_ts(t.get("started_at"))
+        age = None
+        if started is not None:
+            try:
+                age = max(0, int((datetime.datetime.now(started.tzinfo) - started).total_seconds() // 60))
+            except (TypeError, ValueError, OverflowError):
+                age = None
+        running_conc.append({"id": t.get("id"), "age": age,
+                             "write_set": t.get("write_set") or []})
 
     items = _inbox_open_items(ap)
     open_items = [i for i in items if i["status"] == "open"]
@@ -254,12 +295,31 @@ def gather(root):
         epoch = 0
     changelog_last = read_last_line(os.path.join(ap, "contract-changelog.md"))
 
+    symbols_line = ""
+    if sym_mod is not None:
+        try:
+            doc = sym_mod.load(root)
+        except Exception:  # 快照坏了不能让接续包崩
+            doc = None
+        if isinstance(doc, dict):
+            counts = {}
+            for d in doc.get("symbols", []):
+                counts[d.get("name", "")] = counts.get(d.get("name", ""), 0) + 1
+            top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:4]
+            symbols_line = "%d 定义 · 常用 %s%s" % (
+                doc.get("defs", 0),
+                ", ".join("%s×%d" % (n, c) for n, c in top if n) or "无",
+                " · ⚠截断" if doc.get("truncated") else "")
+
     return {
         "root": root, "ap": ap, "state": state, "budget": budget,
         "tasks": tasks, "done": len(done_ids), "ready": ready, "doing": doing,
-        "blocked": blocked, "result": result, "rounds": rounds, "calls": calls,
+        "blocked": blocked, "running_conc": running_conc,
+        "result": result, "rounds": rounds, "calls": calls,
+        "tool_calls": tool_calls, "host_usd": host_usd,
         "open_inbox": open_items, "memories": memories,
         "gate": read_gate(root), "epoch": epoch, "changelog_last": changelog_last,
+        "symbols": symbols_line,
         "skipped": skipped, "host_text": host_text, "started_at": stamp,
     }
 
@@ -283,6 +343,13 @@ def stop_reasons(g, ids):
     max_rounds = as_int(budget.get("max_rounds"))
     if max_rounds and as_int(s.get("rounds_used", 0)) >= max_rounds:
         stops.append("轮次预算耗尽")
+    # H8/H23：工具调用与宿主上报成本（自估成本不进这里）
+    max_tool_calls = as_int(budget.get("max_tool_calls"))
+    if max_tool_calls and as_int(g.get("tool_calls", 0)) >= max_tool_calls:
+        stops.append("工具调用预算耗尽")
+    max_usd = as_float(budget.get("max_usd"))
+    if max_usd and as_float(g.get("host_usd", 0.0)) >= max_usd:
+        stops.append("宿主上报成本预算耗尽（USD）")
     return stops
 
 
@@ -313,6 +380,14 @@ def render(g):
     out.append(f"模式:   {state.get('mode', 'auto')}   阶段: {state.get('phase', 'intake')}")
     out.append(f"预算:   轮 {state.get('rounds_used', 0)}/{budget.get('max_rounds') or '-'}"
                f" · 调用 {g['calls']}/{budget.get('max_calls') or '-'}")
+    # 只在配了这两档上限时才多写，否则接续包与旧版一字不差
+    extra = []
+    if budget.get("max_tool_calls"):
+        extra.append(f"工具 {g.get('tool_calls', 0)}/{budget.get('max_tool_calls')}")
+    if budget.get("max_usd"):
+        extra.append(f"USD(宿主) {g.get('host_usd', 0.0):.2f}/{budget.get('max_usd')}")
+    if extra:
+        out.append("预算:   " + " · ".join(extra))
     out.append(f"时间:   {fmt_ts(g['started_at'])}")
     for w in TS_WARNINGS:
         out.append(f"警告:   {w}")
@@ -333,8 +408,17 @@ def render(g):
                    f" · ready {' '.join(g['ready'][:8]) or '无'}"
                    f" · doing {' '.join(g['doing']) or '无'}"
                    + (f" · blocked {' '.join(g['blocked'])}" if g["blocked"] else ""))
+        if g.get("running_conc"):
+            parts = []
+            for r in g["running_conc"]:
+                age = "%dm" % r["age"] if r.get("age") is not None else "?"
+                parts.append("%s(%s)" % (r["id"], age))
+            out.append("运行中: " + " ".join(parts) + "（并发调度；结束走 dag_scheduler.py finish）")
     else:
         out.append("任务:   未拆解")
+    # H21：跑过 symbols.py scan 才多这一行；没跑过接续包与旧版一字不差
+    if g.get("symbols"):
+        out.append("符号:   " + g["symbols"])
     out.append(f"Epoch:  {g['epoch']} · 契约变更: {g['changelog_last'] or '无'}")
     out.append(f"闸门:   {g['gate']['text']}")
     if g["skipped"]:

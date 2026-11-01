@@ -159,6 +159,53 @@ else
   printf 'RESULT IB%s FAIL legacy 历史行被改写\n' "$idx"
 fi
 
+# ---------------------------------------------------------------- H3 二期：宿主回执对账
+
+TMP3=$(mktemp -d "${TMPDIR:-/tmp}/autopilot-inbox-receipts-XXXXXX")
+mkdir -p "$TMP3/.autopilot"
+expect 0 "对账 fixture：add 两条待批" i add "$TMP3" --kind approval --q "是否执行 git push" --task T-12
+i add "$TMP3" --kind approval --q "是否删掉生产数据" --task T-13 >/dev/null
+i list "$TMP3" >/dev/null
+expect 0 "对账 fixture：真回执答复" i answer "$TMP3" I-1 --by human --answer "同意" --ref int-7
+expect 0 "对账 fixture：伪造回执答复" i answer "$TMP3" I-2 --by human --answer "同意" --ref int-not-exist
+
+printf '{"receipts":[{"interaction_id":"int-7","decision":"approve","by":"human"}]}\n' > "$TMP3/receipts.json"
+out=$(i verify "$TMP3" --receipts "$TMP3/receipts.json" 2>&1); got=$?
+idx=$((idx + 1))
+if [ "$got" = 24 ] && printf '%s' "$out" | grep -q "VERIFIED    I-1" \
+   && printf '%s' "$out" | grep -q "GHOST-REF   I-2"; then
+  printf 'RESULT IB%s PASS 对账：真回执判 VERIFIED、编造的 ref 判 GHOST-REF 并退 24\n' "$idx"
+else
+  fails=$((fails + 1))
+  printf 'RESULT IB%s FAIL 对账判定不对 :: got=%s :: %s\n' "$idx" "$got" "$(printf '%s' "$out" | tr '\n' ' ')"
+fi
+
+# 回执显示的不是肯定答复 → MISMATCH（"我批了"但宿主记录是拒绝）
+printf '{"receipts":[{"interaction_id":"int-7","decision":"reject","by":"human"},{"interaction_id":"int-not-exist","decision":"approve"}]}\n' > "$TMP3/receipts2.json"
+out=$(i verify "$TMP3" --receipts "$TMP3/receipts2.json" 2>&1); got=$?
+idx=$((idx + 1))
+if [ "$got" = 24 ] && printf '%s' "$out" | grep -q "MISMATCH    I-1"; then
+  printf 'RESULT IB%s PASS 回执内容与声称相反时判 MISMATCH，不认执行器的一面之词\n' "$idx"
+else
+  fails=$((fails + 1))
+  printf 'RESULT IB%s FAIL MISMATCH 没生效 :: got=%s :: %s\n' "$idx" "$got" "$(printf '%s' "$out" | tr '\n' ' ')"
+fi
+
+# 没有任何 ref 的历史/口头批准 → NOT-VERIFIED（退 30），不算批准
+printf '{"receipts":[]}\n' > "$TMP3/receipts3.json"
+out=$(i verify "$TMP3" --receipts "$TMP3/receipts3.json" 2>&1); got=$?
+idx=$((idx + 1))
+if [ "$got" = 24 ] && printf '%s' "$out" | grep -q "GHOST-REF"; then
+  printf 'RESULT IB%s PASS 空回执集下所有声称批准都掉出 VERIFIED（要么 GHOST-REF 要么 NOT-VERIFIED）\n' "$idx"
+else
+  fails=$((fails + 1))
+  printf 'RESULT IB%s FAIL 空回执集判定不对 :: got=%s :: %s\n' "$idx" "$got" "$(printf '%s' "$out" | tr '\n' ' ')"
+fi
+
+# 回执文件坏掉 → 用法错（退 2），不静默当成"全部已核对"
+printf 'not json\n' > "$TMP3/bad.json"
+expect 2 "回执文件不是合法 JSON 时退 2，不假装核对过" i verify "$TMP3" --receipts "$TMP3/bad.json"
+
 printf '自检 %d 例，失败 %d\n' "$idx" "$fails"
 [ "$fails" = 0 ] || exit 1
 exit 0

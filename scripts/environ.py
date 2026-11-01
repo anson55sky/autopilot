@@ -8,8 +8,10 @@
   require --repo <path> --need <cap,cap,...>  能力缺失 → 退出码 40 + `ENV SKIP`
   hash    --repo <path> --file <rel> [--impl <shasum|sha256sum|python>] [--display <token>]
   freeze  --repo <path> [--checks <rel>]  用探测到的实现重算 MANIFEST.sha256
+  runtimes --repo <path>                  对一遍运行时指纹（H20；漂移退 41）
+  exec-scan --repo <path> [--record]      执行期新增可执行文件探针（H20；新增退 42，无基线退 40 SKIP）
 
-退出码：0 ok / 40 缺能力（ENV SKIP）/ 2 用法错误 / 3 内部错误。
+退出码：0 ok / 40 缺能力（ENV SKIP）/ 41 运行时漂移（H20，需 REPORT 声明）/ 2 用法错误 / 3 内部错误。
 
 约定：项目内一切相对路径。environment.json 与 acceptance-needs.json 落在 <repo>/.autopilot/，
 刻意**不放 checks/**：checks/ 只装判定脚本，这样 0.9 的冻结排除集能与 0.8 基线逐字节一致
@@ -47,7 +49,13 @@ import shutil
 import subprocess
 import sys
 
-E_OK, E_SKIP, E_USAGE, E_INTERNAL = 0, 40, 2, 3
+E_OK, E_SKIP, E_USAGE, E_INTERNAL, E_DRIFT, E_EXEC = 0, 40, 2, 3, 41, 42
+
+# H20：验收通道完整性。MANIFEST 只保护 checks/ 里的文件，保护不到被调用的解释器本身 ——
+# 换个 node、往 PATH 里塞个同名二进制，就能改变 RESULT。这里把运行时指纹记下来，
+# 让漂移可被查出（漂移不自动改判定，但 REPORT 必须声明，见 SKILL.md §5）。
+RUNTIME_TOOLS = ("python3", "node", "bash", "sh")
+RUNTIME_HASH_LIMIT = 32 * 1024 * 1024  # 超过就不算哈希（Chrome 之类几百 MB，代价不成比例）
 
 BROWSER_NAMES = ("chromium", "chromium-browser", "chrome", "google-chrome",
                  "google-chrome-stable", "msedge", "microsoft-edge")
@@ -365,6 +373,82 @@ def compute_skipped(repo, caps, checks_dir):
     return skipped, None, len(needs)
 
 
+def _runtime_at(real):
+    """给定二进制的绝对路径，取指纹。**绝不写绝对路径**（D 系列中立约束 + M6 隐私判定）：
+    路径只留 sha256 前 12 位，够判断"换没换二进制"，不够反推本机目录。"""
+    rec = {"name": os.path.basename(real), "path_digest": hashlib.sha256(
+        os.path.realpath(real).encode("utf-8")).hexdigest()[:12],
+        "size": None, "sha256": None, "version": None}
+    try:
+        rec["size"] = os.path.getsize(real)
+    except OSError:
+        pass
+    if rec["size"] is not None and rec["size"] <= RUNTIME_HASH_LIMIT:
+        try:
+            h = hashlib.sha256()
+            with open(real, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    h.update(chunk)
+            rec["sha256"] = h.hexdigest()
+        except OSError:
+            rec["sha256"] = None
+    elif rec["size"] is not None:
+        rec["sha256"] = "skipped:too-large"
+    for args in (("--version",), ("-V",)):
+        try:
+            r = subprocess.run([real] + list(args), capture_output=True, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0:
+            text = (r.stdout + r.stderr).decode("utf-8", "replace").strip().splitlines()
+            if text:
+                rec["version"] = text[0][:120]
+            break
+    return rec
+
+
+def detect_runtimes():
+    """把验收会调用的解释器与浏览器指纹记进 environment.json（H20）。"""
+    out = {}
+    for name in RUNTIME_TOOLS:
+        path = shutil.which(name)
+        if path:
+            out[name] = _runtime_at(os.path.realpath(path))
+    browser = None
+    override = os.environ.get("AUTOPILOT_BROWSER", "")
+    if override and os.path.isfile(override):
+        browser = override
+    else:
+        for bname in BROWSER_NAMES:
+            browser = shutil.which(bname)
+            if browser:
+                break
+    if browser:
+        out["browser"] = _runtime_at(os.path.realpath(browser))
+    return out
+
+
+def runtime_drift(stored, fresh):
+    """冻结时点与现在的运行时指纹差异（只报不改判定）。"""
+    lines = []
+    stored = stored or {}
+    for name in sorted(set(stored) | set(fresh)):
+        a, b = stored.get(name), fresh.get(name)
+        if a is None:
+            lines.append("RUNTIME NEW %s %s…" % (name, (b or {}).get("path_digest")))
+        elif b is None:
+            lines.append("RUNTIME GONE %s %s…" % (name, a.get("path_digest")))
+        elif a.get("path_digest") != b.get("path_digest"):
+            lines.append("RUNTIME DRIFT %s 二进制位置变了（%s… → %s…）"
+                         % (name, a.get("path_digest"), b.get("path_digest")))
+        elif a.get("sha256") not in (None, "skipped:too-large") and a.get("sha256") != b.get("sha256"):
+            lines.append("RUNTIME DRIFT %s 同一位置的内容变了（%s… → %s…）"
+                         % (name, str(a.get("sha256"))[:8], str(b.get("sha256"))[:8]))
+        elif a.get("version") != b.get("version"):
+            lines.append("RUNTIME DRIFT %s 版本 %s → %s" % (name, a.get("version"), b.get("version")))
+    return lines
+
+
 def build_environment(repo, checks_dir=None):
     if checks_dir is None:
         checks_dir = ap_paths(repo)["checks"]
@@ -387,12 +471,40 @@ def build_environment(repo, checks_dir=None):
         "schema_version": "0.9",
         "probed_at": utc_now(),
         "capabilities": caps,
+        "runtimes": detect_runtimes(),
         "acceptance_needs": {"mapped": needs_total},
         "skipped_acceptance": skipped,
     }
     if hint:
         doc["hint"] = hint
     return doc
+
+
+def cmd_runtimes(args):
+    """H20：把当前运行时与 environment.json 里采集的指纹对一遍。
+
+    漂移**不自动改判定**（Chrome 自动更新是日常），但它意味着"这一批 RESULT 不是同一套
+    工具链跑出来的"，所以 REPORT 必须声明；控制器不得把漂移当无事发生。
+    """
+    repo = args.repo
+    if not os.path.isdir(repo):
+        print(f"ENV USAGE 2 仓库不存在: {repo}")
+        return E_USAGE
+    env = read_json(ap_paths(repo)["env"], {}) or {}
+    stored = env.get("runtimes") if isinstance(env, dict) else None
+    fresh = detect_runtimes()
+    if not isinstance(stored, dict) or not stored:
+        print("ENV RUNTIMES 0 environment.json 里没有 runtimes 指纹（重跑 environ.py probe 采集）")
+        return E_OK
+    lines = runtime_drift(stored, fresh)
+    if not lines:
+        print("ENV RUNTIMES 0 与采集时点一致（%d 个运行时）" % len(stored))
+        return E_OK
+    for line in lines:
+        print(line)
+    print("ENV RUNTIMES %d 运行时漂移 %d 处：判定不自动改变，但 REPORT 必须声明（H20）"
+          % (E_DRIFT, len(lines)))
+    return E_DRIFT
 
 
 # ---------- CLI ----------
@@ -497,6 +609,76 @@ def cmd_freeze(args):
     return E_OK
 
 
+SCAN_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".build", "build", "dist",
+                  "DerivedData", "vendor", ".venv", "venv", ".tox", ".next"}
+SCAN_FILE = "exec-scan.json"
+SCAN_LIMIT = 10000
+
+
+def list_executables(root):
+    """仓库里当前可执行的文件（相对路径，排序）。产物目录与 .开头目录跳过。"""
+    out = []
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SCAN_SKIP_DIRS and not d.startswith("."))
+        for fn in sorted(filenames):
+            p = os.path.join(dirpath, fn)
+            try:
+                if not os.path.isfile(p) or not os.access(p, os.X_OK):
+                    continue
+            except OSError:
+                continue
+            out.append(os.path.relpath(p, root).replace(os.sep, "/"))
+            if len(out) >= SCAN_LIMIT:
+                return out, True
+    return out, truncated
+
+
+def cmd_exec_scan(args):
+    """H20 执行期探针：冻结时记一次可执行清单，跑完再对一次——**新增可执行文件**就是投毒面。
+
+    网络写盘这一半**不做**：跨 macOS/Linux/WSL 没有可移植的"这轮有没有联网写盘"探测
+    （要 strace/dtrace/端点 ACL，各平台一套），硬做只会得出假的 PASS。缺能力就 SKIP 并声明。
+    """
+    repo = os.path.abspath(args.repo)
+    ap = os.path.join(repo, ".autopilot")
+    cur, truncated = list_executables(repo)
+    path = os.path.join(ap, SCAN_FILE)
+    if args.record:
+        if not os.path.isdir(ap):
+            print("ENVIRON %d 没有 .autopilot 工作区，无法记录基线清单" % E_USAGE)
+            return E_USAGE
+        doc = {"schema": 1, "count": len(cur), "truncated": truncated, "executables": cur}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, ensure_ascii=False, indent=0, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+        print("ENVIRON 0 可执行清单已记录：%d 项%s" % (len(cur), "（触上限，已截断）" if truncated else ""))
+        return E_OK
+    try:
+        with open(path, encoding="utf-8") as fh:
+            base = json.load(fh)
+    except (OSError, ValueError):
+        print("ENVIRON %d SKIP 没有可执行清单基线（先 environ.py exec-scan --record）——"
+              "没基线就判不了，也不许判过" % E_SKIP)
+        return E_SKIP
+    before = set(base.get("executables") or [])
+    now = set(cur)
+    added = sorted(now - before)
+    gone = sorted(before - now)
+    for p in added:
+        print("NEW EXEC %s" % p)
+    for p in gone:
+        print("EXEC REMOVED %s（只提示：删掉执行位也可能是掩盖痕迹）" % p)
+    if added:
+        print("ENVIRON %d 执行期新增 %d 个可执行文件（基线 %d 项）——判定通道可能被污染，"
+              "需要说明来源" % (E_EXEC, len(added), len(before)))
+        return E_EXEC
+    print("ENVIRON 0 无新增可执行文件（基线 %d 项，当前 %d 项）" % (len(before), len(now)))
+    return E_OK
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="environ.sh", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -518,6 +700,13 @@ def main(argv=None):
     p4 = sp.add_parser("freeze"); p4.add_argument("--repo", required=True)
     p4.add_argument("--checks", default=".autopilot/checks")
     p4.add_argument("--impl", default=None); p4.set_defaults(fn=cmd_freeze)
+
+    p5 = sp.add_parser("runtimes"); p5.add_argument("--repo", required=True)
+    p5.set_defaults(fn=cmd_runtimes)
+
+    p6 = sp.add_parser("exec-scan"); p6.add_argument("--repo", required=True)
+    p6.add_argument("--record", action="store_true")
+    p6.set_defaults(fn=cmd_exec_scan)
 
     args = ap.parse_args(argv)
     return args.fn(args)

@@ -21,7 +21,14 @@ TASK_REQUIRED = ["id", "title", "role", "status", "deps", "write_set", "acceptan
 TASK_KEYS = set(TASK_REQUIRED) | {
     "result", "origin", "verification", "mode", "sandbox_target", "flex_permit",
     "epoch", "requires_env", "superseded_by", "proposal_ref", "attempts",
+    "read_set", "premise_tag", "started_at", "ended_at", "session_id",
+    "dispatch_round", "last_error", "closed_round", "idempotent",
+    "est_assertions", "est_changed_lines",
 }
+# H10：单卡规模软上限。超了只是警告（拆波次），不阻断判定、不影响退出码。
+SIZE_LIMIT_ASSERTIONS = 5
+SIZE_LIMIT_LINES = 300
+WARNS = []
 ROLES = {"Builder", "Verifier", "Planner", "Triage", "Explorer"}
 STATUSES = {"pending", "doing", "blocked", "done", "failed", "superseded"}
 MODES = {"strict", "flex-light", "flex-heavy"}
@@ -106,6 +113,31 @@ def check_task(t, ids):
         bad = set(t["requires_env"] or []) - ENV_ITEMS
         if bad:
             errs.append(f"{tid}: requires_env 含未知能力 {sorted(bad)}")
+    # P2 并发运行时字段：缺省不写；写了就必须是相对路径 / 正确类型。
+    for p in t.get("read_set") or []:
+        if not is_relpath(p):
+            errs.append(f"{tid}: read_set 出现非相对路径 {p!r}")
+    for f in ("started_at", "ended_at", "session_id", "premise_tag", "last_error"):
+        if f in t and not isinstance(t[f], str):
+            errs.append(f"{tid}: {f} 必须是字符串")
+    if "dispatch_round" in t and (not isinstance(t["dispatch_round"], int)
+                                  or isinstance(t["dispatch_round"], bool)
+                                  or t["dispatch_round"] < 0):
+        errs.append(f"{tid}: dispatch_round 必须是 ≥0 的整数")
+    # H12 / H25 / H10 的新字段：写了就必须类型正确；规模超限只警告。
+    for f in ("closed_round", "est_assertions", "est_changed_lines"):
+        if f in t and (not isinstance(t[f], int) or isinstance(t[f], bool) or t[f] < 0):
+            errs.append(f"{tid}: {f} 必须是 ≥0 的整数")
+    if "idempotent" in t and not isinstance(t["idempotent"], bool):
+        errs.append(f"{tid}: idempotent 必须是布尔（重派是否安全）")
+    est_a = t.get("est_assertions")
+    if isinstance(est_a, int) and not isinstance(est_a, bool) and est_a > SIZE_LIMIT_ASSERTIONS:
+        WARNS.append(f"{tid}: est_assertions={est_a} 超过单卡 {SIZE_LIMIT_ASSERTIONS} 条软上限"
+                     f"（H10：拆成顺序波次，契约外置到 rounds/r-XX-contract*.md）")
+    est_l = t.get("est_changed_lines")
+    if isinstance(est_l, int) and not isinstance(est_l, bool) and est_l > SIZE_LIMIT_LINES:
+        WARNS.append(f"{tid}: est_changed_lines={est_l} 超过单卡 {SIZE_LIMIT_LINES} 行软上限"
+                     f"（H10：工人单次输出触顶会零落盘）")
 
     mode = t.get("mode", "strict")
     if mode not in MODES:
@@ -133,6 +165,7 @@ def check_task(t, ids):
 
 def check_doc(doc):
     errs = []
+    WARNS.clear()
     if not isinstance(doc, dict):
         return ["根必须是对象"]
     for k in ("tasks",):
@@ -197,6 +230,36 @@ FIXTURES = [
                                "deps": [], "write_set": ["sandbox/draft/a.js"], "acceptance": [],
                                "card": ".autopilot/tasks/T-97.md", "mode": "flex-heavy",
                                "sandbox_target": "sandbox/draft", "proposal_ref": "sandbox/proposals/P-1.md"}]}, False),
+    ("P2 运行字段合法", {"tasks": [{"id": "T-98", "title": "x", "role": "Builder", "status": "doing",
+                                "deps": [], "write_set": ["src/a.js"], "read_set": ["src/b.js"],
+                                "acceptance": ["A1"], "card": ".autopilot/tasks/T-98.md",
+                                "premise_tag": "parser-state", "started_at": "2026-10-31T00:00:00+00:00",
+                                "dispatch_round": 2, "session_id": "s-1"}]}, False),
+    ("dispatch_round 为负", {"tasks": [{"id": "T-99", "title": "x", "role": "Builder", "status": "doing",
+                                  "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                  "card": "c.md", "dispatch_round": -1}]}, True),
+    ("read_set 绝对路径", {"tasks": [{"id": "T-100", "title": "x", "role": "Builder", "status": "pending",
+                                  "deps": [], "write_set": ["src/a.js"], "read_set": ["/etc/passwd"],
+                                  "acceptance": ["A1"], "card": "c.md"}]}, True),
+    ("started_at 非字符串", {"tasks": [{"id": "T-101", "title": "x", "role": "Builder", "status": "doing",
+                                    "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                    "card": "c.md", "started_at": 123}]}, True),
+    ("未知字段仍被拦", {"tasks": [{"id": "T-102", "title": "x", "role": "Builder", "status": "pending",
+                                "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                "card": "c.md", "concurrent": True}]}, True),
+    ("H12/H25/H10 字段合法", {"tasks": [{"id": "T-103", "title": "x", "role": "Builder", "status": "done",
+                                   "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                   "card": "c.md", "closed_round": 3, "idempotent": False,
+                                   "est_assertions": 4, "est_changed_lines": 200}]}, False),
+    ("idempotent 非布尔", {"tasks": [{"id": "T-104", "title": "x", "role": "Builder", "status": "pending",
+                                "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                "card": "c.md", "idempotent": "no"}]}, True),
+    ("closed_round 为字符串", {"tasks": [{"id": "T-105", "title": "x", "role": "Builder", "status": "done",
+                                   "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                   "card": "c.md", "closed_round": "3"}]}, True),
+    ("bool 冒充整数被拦", {"tasks": [{"id": "T-106", "title": "x", "role": "Builder", "status": "pending",
+                                "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                                "card": "c.md", "est_assertions": True}]}, True),
 ]
 
 
@@ -210,7 +273,17 @@ def self_test():
             print(f"RESULT S{i} FAIL 反例判定错 {name} :: should_fail={should_fail} errs={errs[:2]}")
         else:
             print(f"RESULT S{i} PASS {name}")
-    print(f"自检 {len(FIXTURES)} 例，错 {fails}")
+    # 警告通道单独验一次：超限必须只警告，不得进 errs、不得影响退出码
+    n = len(FIXTURES) + 1
+    check_doc({"tasks": [{"id": "T-107", "title": "x", "role": "Builder", "status": "pending",
+                          "deps": [], "write_set": ["src/a.js"], "acceptance": ["A1"],
+                          "card": "c.md", "est_assertions": 9, "est_changed_lines": 999}]})
+    if not WARNS or len(WARNS) != 2:
+        fails += 1
+        print(f"RESULT S{n} FAIL H10 规模警告通道不对 :: WARNS={WARNS[:3]}")
+    else:
+        print(f"RESULT S{n} PASS H10 规模超限只警告，不阻断判定")
+    print(f"自检 {n} 例，错 {fails}")
     return 1 if fails else 0
 
 
@@ -229,6 +302,10 @@ def main():
         print(f"校验失败：{len(errs)} 项")
         return 1
     print("RESULT S1 PASS tasks.json 符合契约（mode 缺省 strict，写集全相对路径，无依赖环）")
+    for w in WARNS:
+        print("WARN %s" % w)
+    if WARNS:
+        print("警告 %d 条（H10 规模软上限，不阻断判定、不影响退出码）" % len(WARNS))
     return 0
 
 

@@ -1,4 +1,4 @@
-# sandbox 布局与留痕策略（A1/A8）
+# sandbox 布局与留痕策略（A1/A8 + H13 隔离探测 + H27 读拒绝）
 
 `checks/` 与 `baseline/` 保持原样。
 
@@ -58,3 +58,39 @@ flex 卡的 `sandbox_target` 必须落在这几个之下，其他名字一律拒
 `drafts/` 的四份素材供人在 INTAKE 定稿时直接摘用。冻结 `GOAL.md` 之后：
 - 素材保留（供对比"定稿前后差异"，是 M1 之外最有用的历史）；
 - 不得再引用 `prototype/` 里的代码作为任何 A# 的实现依据——原型答案只回答"可行吗"，不回答"做完了"。
+
+## 6. 读拒绝（H27）
+
+业界实证：`@anthropic-ai/sandbox-runtime` 的默认是**写拒 / 网拒，但读全开**——直接复用比现有
+deny-list 更弱。所以凭据与私密路径必须**显式列进读拒绝**，由 `scripts/sandbox.py` 判定，
+判定前做路径归一（`~`/环境变量展开 + `normpath`，`../` 写法绕不过去）：
+
+| 类别 | 清单（节选） | 命中 |
+| --- | --- | --- |
+| 凭据/私密目录（相对 `$HOME`） | `.ssh` `.aws` `.gnupg` `.config/gcloud` `.config/gh` `.netrc` `Library/Keychains` `Library/Application Support/Google/Chrome` `.mozilla` `.config/chromium` | 退 24 |
+| 私密文件形态（任何位置） | `*.pem` `*.key` `*.p12` `*.pfx` `.env` `.env.*` `id_rsa*` `credentials.json` `*cookies*` `*secret*` | 退 24 |
+| 控制面按角色分档 | Builder / Explorer **不得读** `.autopilot/`（读了冻结验收等于照着答案写题）；Verifier 只许读 `.autopilot/rounds/` | 退 24 |
+
+读写矩阵的可执行入口：
+
+```
+python3 {SKILL_ROOT}/scripts/sandbox.py check-read  --repo {REPO_ROOT} --role builder --path …
+python3 {SKILL_ROOT}/scripts/sandbox.py check-write --repo {REPO_ROOT} --role builder --path … --allow src/a.py
+```
+
+## 7. 隔离模式与降级（H13）
+
+| 模式 | 含义 | 由谁保证 | 探不到时 |
+| --- | --- | --- | --- |
+| A 容器/microVM | `docker` / `podman` / `bwrap` / `runjail`，或 macOS `sandbox-exec` | 宿主与 OS | `probe` 判 `resolved_mode=none` 并打印 `DEGRADE` |
+| B 拦截 + 审批（缺省即有） | deny-list 预检 + 人工审批 + 写集约束 + 留痕 | `flex-gate.sh` / `toolgate.py` / `sandbox.py` | —（不依赖容器） |
+
+- `probe` 把结论落 `.autopilot/sandbox.json`（平台、请求模式、实得模式、可用工具、两份清单）。
+- **判 SKIP 不是判通过**：依赖隔离的验收条目在 `resolved_mode=none` 时必须输出
+  `RESULT <A#> SKIP 无容器隔离能力…`，REPORT 附降级声明（B3/B4 口径）。
+- `plan --render` 只**渲染**命令模板（`--read-only`、`--network none`、凭据目录不挂载）；
+  本模块不执行任何容器命令——不可逆动作一律交人或宿主（铁律 5）。
+
+开关：GOAL.md 的可选段 `## SANDBOX`（`enable / mode / deny_net`）。**不写这一段 = 关闭态**：
+`sandbox.py` 所有子命令退 23，不探测、不产出策略、不落 `sandbox.json`，
+第 1–5 节的既有机制（写集、留痕、提案通道）与引入本模块之前一字不差。

@@ -97,6 +97,7 @@ flex_budget_ratio   = 0.20     # A3 flex 占总预算比例，calls / minutes �
 flex_same_target_cool = 2      # 同一 A# 或同一文件，连续 N 轮内不得重复 flex
 flex_no_progress_stop = 2      # 零进展连击达 N → 本轮禁 flex（别名 flex_consecutive_no_progress_stop 同义）
 batch_permits_total = 2        # A7 每个 run 的批量写令牌上限
+branch_max          = 0        # H35 同一张 flex 卡的分支数上限，0 = 不启用多分支对比（flexbranch.py 退 23）
 heavy_proposals     = 2        # B2 提案簿条数上限，超限触发停机升级
 ```
 
@@ -117,14 +118,121 @@ heavy_proposals     = 2        # B2 提案簿条数上限，超限触发停机�
 两行同时出现时收敛到更严值，试图放宽的那一行被忽略。
 -->
 
+## CONCURRENT（可选，0.9.6 叠加 / P2）
+
+<!-- 整节不填或 enable = false：派发完全走串行基线 —— round_prompt 输出、status/resume 文案、
+     ledger 事件与开关关闭前逐字节一致（A-conc-01）。开启只改变 strict 卡的派发与状态记账，
+     不改变判定：RUNNING 未清空时不开验证窗口，r-XX.passed 仍只来自冻结 run.sh 的 RESULT 行。 -->
+
+```
+enable                = false        # false=串行基线；true=按 DAG 并发派发 strict 卡
+max_concurrent_builder = 3           # 同时运行的 strict 工人上限，与「预算·并行」取更严者
+halt_policy           = wait-running # wait-running=等 RUNNING 收尾；kill-running=只出 KILL 清单，杀由执行器调宿主原语
+task_timeout_min      = 30           # 只记账：recover 把超时卡标 failed/stale，脚本自己不杀（G3/H6）
+```
+
+- 关闭 = 等价基线：`round_prompt.sh` 不插入并发段；`dag_scheduler.py` 的
+  `plan / status / start / finish / recover` 一律退出码 23（`config` 只读，始终可用）。
+- 并发只发生在**同工作区、同 epoch、依赖已 done、写集互不冲突**的 strict 卡之间。
+  写集冲突按目录前缀判定；flex 卡在 `plan` 里显示为 `FLEX-SERIAL`，照旧走串行流程（G4）。
+- `tasks.json` 是唯一事实源：并发模式下只有 `dag_scheduler.py start/finish/recover` 写它的
+  运行字段（mkdir+PID 锁，陈旧锁可抢占）；串行侧状态变更走 `status.py task set` 单写者。
+- `task_timeout_min` 不是硬杀：`recover` 只把超时卡记成 failed/stale，已派出的工人仍可能继续跑完。
+  `halt_policy = kill-running` 也不是脚本去杀 —— 它只让 `recover` 多打一份
+  `KILL <卡> session=<id>` 清单，由**执行器**调宿主 `stop_chat_session` 原语执行；
+  `host.json` 未上报 `kill_session` 时自动退化回 `wait-running` 并打 NOTE，
+  卡上没有 `session_id` 时打 `KILL-UNAVAILABLE`，绝不假装杀过（G3/H6）。
+- `halt_policy` 两个取值：`wait-running`（缺省，有卡失败即停止新派发，等 RUNNING 收尾或
+  被 `recover` 标超时后，才进入验证窗口与报告）与 `kill-running`（同上，但额外产出 KILL 清单）。
+  其它取值按未支持处理：回落 `wait-running` 并打 NOTE，不放行乱写的策略。
+
+## TOOLBOX（可选，0.9.6 叠加 / H7）
+
+<!-- 整节不填或 enable = false：`toolgate.py` 的所有子命令退 23，等同于没装这个模块
+     （A-tg-01）。它不是沙箱：只对**仓库内的文件写**承诺可回滚，
+     网络/消息/数据库/装依赖这类外部副作用一旦发出收不回来（A-tg-06）。 -->
+
+```
+enable          = false        # true 才启用工具闸门
+allow           = ""           # 逗号分隔的工具白名单；空 = 全拒（A-tg-02）
+snapshot_files  = true         # 声明了 --files 的调用前自动快照，可 rollback
+max_calls_round = 0            # 每轮工具调用上限，0 = 不设（A-tg-07）
+```
+
+- 不可逆命令的判定**与 `flex-gate` 共用同一份 deny-list**（单一策略源）：命中退 24 转待批，
+  闸门自己不执行任何工具（要真执行得由执行器调宿主工具，闸门只放行/记账/快照）。
+- 每次调用都落 `sandbox/.toolgate/calls.jsonl`，并向项目 ledger 写一条 `{"type":"tool"}` ——
+  「预算」里的 `max_tool_calls` 就是数它（H8）。
+
+## VERIFY_ACL（可选，0.9.6 叠加 / H31）
+
+<!-- 整节不填或 enable = false：`verifier.py` 所有子命令退 23，`round_prompt.sh` 也不追加任何
+     权限段——输出与没有本特性的版本逐字节一致。 -->
+
+```
+enable       = false         # true 才要求验证者声明权限档位
+require_mode = plan          # 只读档位白名单，逗号分隔（宿主档位名，如 plan / read-only）
+degrade      = declare       # 宿主无 session_mode 原语时：declare=放行但必须出降级声明 | block=拦住
+```
+
+- **分级说清楚**（不许把提示词级写成脚本级）：脚本能拦的是"没声明 / 声明过期 / 声明的档位不在
+  白名单"（退 24，该结论不得写进 `r-XX.json`）；档位**是否真的被强制**取决于宿主有没有
+  `host.json.primitives.session_mode`，没有就只是执行器自报。
+- 一次声明只覆盖一轮：`check` 比对 `state.json` 的当前轮，跨轮复用退 24。
+- 收轮前 `verifier.py audit --round N`：有验证结论却没有对应声明 = 判定来源不明。
+
+## SANDBOX（可选，0.9.6 叠加 / H13 + H27）
+
+<!-- 整节不填或 enable = false：`sandbox.py` 所有子命令退 23，不探测、不产出策略、不落
+     `sandbox.json`；写集与留痕机制照旧（specs/sandbox-layout.md 第 1–5 节）。 -->
+
+```
+enable   = false
+mode     = auto        # auto | container | native | off
+deny_net = true        # 渲染的容器模板里带网络拒绝
+```
+
+- **读拒绝**是这一节的主要内容：外部沙箱运行时（如 sandbox-runtime）默认"写拒 / 网拒但**读全开**"，
+  直接复用比现有 deny-list 更弱，所以凭据目录与私密文件形态必须显式列出（清单见
+  `{SKILL_ROOT}/specs/sandbox-layout.md` 第 6 节）。
+- 角色分档：Builder / Explorer 不得读 `.autopilot/`；Verifier 只许读 `.autopilot/rounds/`。
+- `probe` 探不到容器时判 `none` 并打印 DEGRADE —— 依赖隔离的验收条目此时**判 SKIP，不判 PASS**（B3）。
+- `plan --render` 只渲染命令模板，**不执行**任何容器命令（铁律 5）。
+
+## TRIGGER（可选，0.9.6 叠加 / H36）
+
+<!-- 整节不填或 enable = false：`trigger.py` 所有子命令退 23，不加锁、不写账本、不产出决策。 -->
+
+```
+enable            = false
+interval_min      = 20        # 宿主定时器的节拍，只用来判断上一跳是否漏拍
+max_auto_sessions = 12        # 本 run 内自动接续上限，触顶就停手等人
+stop_phase        = report    # 到该阶段不再自动接续，交回人工
+```
+
+- 本模块只**决策**：`decide` 答"该不该开第 N 轮"（GO / HOLD / BUSY / STOP / ASK-HUMAN），
+  `claim`/`release` 防止定时器重复敲时开出第二个会话。**建会话、发消息一律由宿主做**（铁律 5）。
+- 有待批项时判 `ASK-HUMAN`（退 24）：自动接续**不得**代处理不可逆动作。
+- 启用外部接续必须在 REPORT 里声明（这是运行方式的变更，不是免费的性能开关）。
+
 ## 预算
 
 - 轮次 ≤ {{MAX_ROUNDS}}
 - 每轮任务 ≤ {{MAX_TASKS}}
 - 并行 ≤ {{PARALLEL}}
 - 总时长 ≤ {{BUDGET_MIN}} 分钟（`started_at` 必须带时区偏移，C3：缺偏移会让 summary/resume 抛 TypeError 而非算错）
+  - 口径是**墙钟**：机器休眠、你离开不干活，照样计入（实测：一次 12 小时休眠烧掉 700+ 分钟）。
+    可用 `status.py pause/resume` 把不干活的时间拆出来，`summary` 会多出「时间账」一行、
+    `metrics` 多 `slept_minutes / active_minutes` 两个字段 —— 但**停止判定仍按墙钟**（H9）。
+    要让判定改成按活跃时长，必须由人改本节，控制器不得自行放宽。
 - 子代理调用 ≤ {{MAX_CALLS}}
 - token：可选记录，缺省 `unset`，**不参与停止判定**（脚本层不可自观测，写进停止条件就是假指标）
+  - 例外（H23）：**宿主上报**的用量可以参与判定。口径是账本里
+    `{"type":"usage","usd":1.2,"source":"host"}` 的事件，配 `max_usd` 才生效；
+    脚本自己估的数字只显示、永不进停止条件。
+- 工具调用上限（H8，可选）：`max_tool_calls`，计账本里 `{"type":"tool","name":...}` 事件；
+  配了才参与判定。加设或收紧走 `status.py budget <repo> max_tool_calls=400`；
+  **放宽或取消上限属契约变更**，脚本会拒（退 24 / 夹回更严值），只能由人改 `state.json`。
 - flex 独立子预算：`flex_rounds / flex_calls / flex_minutes` 单独计数，
   缺省 ≤ 总预算 × `flex_budget_ratio`；耗尽自动回落 strict 并在本轮记 `flex_exhausted`（A3）
 

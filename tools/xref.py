@@ -28,7 +28,17 @@ PATH_RE = re.compile(
 SELFTEST_RE = re.compile(r"\b([\w.-]+\.selftest\.sh)\b")
 MREF_RE = re.compile(r"\bM([1-9]|1[0-1])\b")
 ID_SECTION_RE = re.compile(r"\b([ABCD][1-9])\b")
+# X7 的显式豁免：起步范式模板里的 A# 是"验收矩阵第几行"的示例，不是裁决编号。
+# 豁免只准写成前缀清单，且只此一条 —— 整棵 templates/ 都豁免等于不检查。
+ID_EXEMPT_PREFIX = ("templates/presets/",)
 IMPORT_RE = re.compile(r"^\s*(?:import|from)\s+([a-zA-Z_][\w.]*)", re.M)
+
+# X8（H29）：裁决条目的可定位证据
+DEC_ENTRY_RE = re.compile(r"^- \*\*([A-H]\d{1,2})\s")
+FILE_REF_RE = re.compile(r"[A-Za-z0-9_.@-]+\.(?:py|sh|md|json|txt|mjs)")
+SELFTEST_ID_RE = re.compile(r"\b(A-conc-\d+|IB\d+|S\d+\.\d+|S\d+|E\d+|P\d+)\b")
+EXIT_CODE_RE = re.compile(r"(?:退出码|退|exit\s*=|exit=)\s*(\d{1,3})")
+SECTION_REF_RE = re.compile(r"§\s*\d")
 
 STDLIB = set(sys.stdlib_module_names)
 
@@ -205,6 +215,9 @@ def check_ids_defined(root, findings):
     for fp in walk_files(root):
         if os.path.basename(fp) == "00-DECISIONS.md":
             continue
+        rel = os.path.relpath(fp, root).replace(os.sep, "/")
+        if any(rel.startswith(p) for p in ID_EXEMPT_PREFIX):
+            continue
         if not fp.endswith((".md", ".txt")):
             continue
         for m in ID_SECTION_RE.finditer(strip_code(read(fp))):
@@ -215,6 +228,54 @@ def check_ids_defined(root, findings):
                                        f"{', '.join(missing[:10])}"))
     else:
         findings.append(("X7", "PASS", f"{len(used)} 个 A/B/C/D 编号引用都能在裁决记录里定位"))
+
+
+def check_decision_evidence(root, findings):
+    """X8（H29）：每条裁决必须自带可定位证据。
+
+    立规理由：这次升级里我把**已经实现的 B8** 写成"尚未落地"并落进裁决文档，
+    而本工具其他检查只问"引用能不能解析"，问不出"事实对不对"。
+    所以每条 `- **G1 …**` 必须至少指向：脚本/文件名、存在的自测编号、退出码、或文档小节。
+    """
+    dec = read(os.path.join(root, "00-DECISIONS.md"))
+    if not dec:
+        findings.append(("X8", "SKIP", "缺 00-DECISIONS.md"))
+        return
+    ids = set()
+    for fp in walk_files(root):
+        if fp.endswith(".selftest.sh") or os.path.basename(fp) in ("run.sh", "check.sh"):
+            for m in SELFTEST_ID_RE.finditer(read(fp)):
+                ids.add(m.group(1))
+    lines = dec.split("\n")
+    entries, missing = 0, []
+    i = 0
+    while i < len(lines):
+        m = DEC_ENTRY_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        head = lines[i]
+        i += 1
+        body = []
+        while i < len(lines) and lines[i].strip() and not DEC_ENTRY_RE.match(lines[i]) \
+                and not lines[i].startswith(("#", "|", "```", ">")):
+            body.append(lines[i])
+            i += 1
+        entries += 1
+        text = head + "\n" + "\n".join(body)
+        if FILE_REF_RE.search(text) or SECTION_REF_RE.search(text) or EXIT_CODE_RE.search(text):
+            continue
+        if [t for t in SELFTEST_ID_RE.findall(text) if t in ids]:
+            continue
+        missing.append(m.group(1))
+    if missing:
+        findings.append(("X8", "FAIL",
+                         "%d/%d 条裁决没有可定位证据（脚本名 / 存在的自测编号 / 退出码 / §小节）:: %s"
+                         % (len(missing), entries, ", ".join(missing))))
+    else:
+        findings.append(("X8", "PASS",
+                         "%d 条裁决全部带可定位证据（自测编号事实源：%d 个，取自 *.selftest.sh）"
+                         % (entries, len(ids))))
 
 
 def main():
@@ -232,7 +293,7 @@ def main():
     findings = []
     check_paths(root, findings, tuple(extra))
     for fn in (check_selftests, check_meta_ids, check_stdlib_only,
-               check_shebang, check_ids_defined):
+               check_shebang, check_ids_defined, check_decision_evidence):
         fn(root, findings)
 
     fails = [f for f in findings if f[1] == "FAIL"]

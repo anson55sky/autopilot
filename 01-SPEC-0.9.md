@@ -108,6 +108,73 @@
 另有一条**上位裁决**（F4）：`specs/craft.md` 沿用了上游的「提交与推送」原则，
 但该原则在 autopilot 工作区内**不适用** —— Git 写操作属于铁律 5，一律转待批。
 
+### 2.8 strict 卡 DAG 并发（G 组，P2，默认关闭）
+
+`GOAL.md` 的 `## CONCURRENT` 区块 `enable = true` 时才生效，整节不填 = 关闭 = 串行基线
+（`round_prompt.sh` 输出逐字节一致，A-conc-01；关闭态调度子命令统一退出码 23）。
+并发只发生在**同工作区、同 epoch、依赖已 done、写集互不冲突**的 strict 卡之间；
+flex 卡一律 `FLEX-SERIAL`，照旧走串行（G4）。`tasks.json` 是唯一事实源，运行时写入口只有
+`dag_scheduler.py start/finish/recover` 与 `status.py task set`（mkdir+PID 锁，陈旧可抢占）。
+超时只记账标 failed/stale，**不杀工人**（G3）；验证窗口在无 RUNNING 时打开，
+`r-XX.passed` 仍只来自冻结 `run.sh` 的 RESULT 行。退出码 20/21/22/23/24 见 SKILL.md §7.1。
+
+**2.8.1 档 1–2 落地增补（0.9.6，2026-11-01，均已实现并有自测）**
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H6 | `halt_policy=kill-running` → `recover` 打印 `KILL <卡> session=<id>`，由执行器调宿主 `stop_chat_session`；宿主无原语则退化 + NOTE；无 session 打 `KILL-UNAVAILABLE` | 脚本出清单，执行器执行 | `A-conc-11` |
+| H26 | `plan/status/config` 打印 `limit=<n> limit_from=<谁更严>` 与 `halt=… kill=…` | 脚本级 | `A-conc-11` |
+| H12 | `done` 时两个写入口都写 `closed_round`；`close-round` 用它（或本轮窗口内的 `ended_at`）核对 `tasks_closed`，对不上退 **24** 且**零写盘**；无记账字段的老工作区不打印、不拦 | 脚本级 | status 自检例 12 |
+| H25 | 卡 `idempotent=false` 且 `attempts>0` 时 `start` 退 24；`--allow-non-idempotent --note <理由>` 人工放行，理由进账本 | 脚本级 | `A-conc-12` |
+| H10 | 卡新增 `est_assertions` / `est_changed_lines`，超软上限（5 断言 / 300 行）时 `schema/check.py` 只出 `WARN`，不进 errs、不改退出码 | 警告级 | schema 自检 S16/S17 |
+| H11 | 还原/回滚必须当场 `status.py log` 一条 `type=revert`（带还原前后 sha256）；SKILL.md §10 给命令、§11 列为反模式 | **文档/提示词级，脚本不拦截** | SKILL.md §10/§11 |
+
+新增 schema 字段一律**可选**：`closed_round`、`idempotent`、`est_assertions`、`est_changed_lines`。
+不写 = 老行为，关闭态与串行基线仍逐字节一致（`A-conc-01` + 元验收 M1）。
+
+**2.9 档 4 落地增补（0.9.6，2026-11-01，均已实现并有自测）**
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H2/H24 | 记忆只有 `playbook.md` 一个存储；新增 `tags/ref` 反查、`invalidate → sup` 失效链、`recall --limit + --max-chars` **双上限**；Builder/Verifier/Explorer 只能 `--suggest` | 脚本级拦动作；**身份自报，属提示词级**（按 H3 如实声明） | `playbook.selftest.sh` 19 项 |
+| H8 | `state.budget.max_tool_calls` + 账本 `{"type":"tool"}` 计数；`status.py budget` 只准新设或收紧，放宽被夹回更严值，取消上限退 24 要人动手 | 脚本级 | status 自检例 13 |
+| H23 | `max_usd` 只认 `{"type":"usage","source":"host"}`；自估成本一律只显示、不进停止条件 | 脚本级 | status 自检例 13 |
+| H7 | 新模块 `scripts/toolgate.py`：`## TOOLBOX` 白名单 + 每轮上限 + 不可逆复用 `flexgate.DENY_PATTERNS` + 文件写快照/回滚；**副作用类工具 rollback 直接退 24** | 脚本级；闸门自身不执行任何工具 | `toolgate.selftest.sh` 24 项（A-tg-01…07） |
+| H9 | `status.py pause/resume` + `summary 时间账` + `metrics.slept_minutes/active_minutes`；判定仍按墙钟 | 脚本级（口径不放宽） | status 自检例 9 |
+| H20 | `environment.json.runtimes`（路径摘要 + 大小 + sha256 + 版本，**不含绝对路径**）；`environ.py runtimes` 漂移退 41；deny-list 增 PATH/系统二进制/`curl \| sh` | 脚本级；漂移不改判定，须 REPORT 声明 | environ 自检 E13–E16、flex-gate S29–S33 |
+| H29 | `tools/xref.py` 新增 X8：每条裁决必须引用脚本名 / 存在的自测编号 / 退出码 / §小节 | 脚本级（FAIL 退出 1） | xref X8：82 条全通过 |
+
+三者都遵守同一条关闭态纪律：**不写配置 = 老工作区一字不差**（`toolgate`/`budget`/`pause` 未启用时
+`summary`、`resume`、`environment.json` 的输出与 0.9.5 相同，`A-tg-01` 与 status 自检例 13 分别钉住）。
+
+**2.10 观测与导出增补（0.9.6，2026-11-01，均已实现并有自测）**
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H15 | `tools/dashboard.py render/check`：单文件静态看板（内联 CSS/JS、零外部引用、路径脱敏、只读 `.autopilot/`） | 只读；不构成验收证据 | `dashboard.selftest.sh` 10 项（A-db-01…05） |
+| H16 | `scripts/triage.py`：四类根因（env/unimpl/code/acceptance）+ 前提置疑点名；`export.py pack/verify`：证据包 + sha256 清单 + 事后篡改可查 | 脚本级只作建议；**不改判定、不改 checks/** | `triage.selftest.sh` 9 项、`export.selftest.sh` 15 项 |
+| H32 | `export.py pr`：PR-ready 描述（判定来源、盲区、diff、SKIP 单列、"不执行 push"声明） | 脚本级；无 git 写操作 | `export.selftest.sh` A-ex-05 |
+| H34 | `export.py otel`：账本 → OTLP 风格 span JSON，属性脱敏，**只落文件不发网络** | 脚本级、默认不启用（显式调用才出） | `export.selftest.sh` A-ex-06 |
+| H30 | `plan` 派发决策可重放：同一 `tasks.json` 连跑 5 次退出码与输出逐字节一致；无随机源、时钟只用于戳与超时 | 脚本级（回归测试钉住） | `A-conc-13` |
+
+**2.11 档 5–6 落地增补（0.9.6，2026-11-01）**
+
+| 项 | 机制 | 强制层级 | 证据 |
+| --- | --- | --- | --- |
+| H14 | `tools/upgrade.sh` 成为**唯一升级入口**：非 git 目标退 24、脏工作树退 24（`--allow-dirty` 先把工作树整体快照 `worktree.tar`）、同步前落 `HEAD` 快照、同步后自动复验（全部自测 + schema + xref + 隐私 + 冒烟，全量再加 e2e/元验收/迁移彩排）、失败退 1 并打印可执行回滚命令；**绝不 commit/push** | 脚本级（`cutover.sh` 降为其内部件，由迁移彩排调用） | `upgrade.selftest.sh` A-ug-01…06（10 项） |
+| H20② | `templates/checks/run.sh.example` 新增 `runtime_stable <A#>`：把运行时指纹接进**冻结判定通道**（漂移→FAIL，无基线→SKIP），不再只在 REPORT 里声明 | 模板脚手架（项目侧启用才生效）；缺基线判 SKIP 不判 PASS | `environ.selftest.sh` E13–E16 |
+| H33① | `templates/checks/probe-geometry.mjs`：DOM 浮层 rect 换算到 canvas 坐标与 HUD 求交，相交即 FAIL；**取不到数据退 3 打 `NOGEOMETRY`，禁止静默 PASS** | 模板脚手架；判定仍由冻结 `run.sh` 的 RESULT 行出 | `geometry.selftest.sh` 5 项 |
+| H33② | `tools/pixel_diff.py`：与基线图像素差占比 ≤ 阈值，`--mask` 排除动态区、`--channel-tol` 单通道容差；PNG 解码自写（8-bit 非隔行、colortype 2/6、过滤 0–4），零第三方 | 工具级；坏图/尺寸不一致退 3 判 SKIP 不判过 | `pixel.selftest.sh` A-px-01…07（7 项） |
+| H20④ | `environ.py exec-scan --record/--diff`：执行期新增可执行文件逐条 `NEW EXEC` 退 **42**；产物目录跳过；无基线判 SKIP；`run.sh.example` 配 `no_new_executables <A#>`。**网络写盘检测因跨平台不可行为不做** | 脚本级（新增拦、缺基线不假绿） | `environ.selftest.sh` E17–E21 |
+| H21 | `scripts/symbols.py scan/find/brief`：各语言定义式正则 → `.autopilot/symbols.json`（全排序、无时间戳、可复现）；`resume.py` **仅在快照存在时**多打一行「符号:」；上限（文件数/定义数/单文件大小与条数）触顶即置 `truncated` 并在摘要里明写 | 脚本级只读；零 DB、零第三方、无常驻（全局约束 4） | `symbols.selftest.sh` A-sy-01…07（9 项，含关闭态逐字节等价） |
+| H13/H27 | GOAL 可选段 `## SANDBOX`（缺省关：子命令退 23、不落文件）+ `scripts/sandbox.py probe/plan/check-read/check-write`：隔离能力探测（`container`/`native`/`none`，探不到打印 DEGRADE 并按 B3 判 SKIP）、凭据与私密路径**读拒绝**（路径归一后判定，含 `../` 穿越）、角色分档读写矩阵；**只渲染容器命令模板，不执行** | 脚本级判定；容器强制力属宿主/OS，探不到就如实降级 | `sandbox.selftest.sh` A-sb-01…08（10 项） |
+| H3 二期 | `inbox.py verify --receipts <宿主回执.json> [--strict]`：声称的批准逐条对账——回执无此 ref → `GHOST-REF`(24)、回执与声称相反 → `MISMATCH`(24)、无 ref/legacy → `NOT-VERIFIED`(30)、回执文件坏 → 2 不假装核对过；不联网、不调宿主 API | 脚本级对账；回执由执行器导出 | `inbox.selftest.sh` IB23…IB26（共 26 例） |
+| H19 | `scripts/metrics.py verdicts/cost/summary`：同 `manifest` 戳内的判定漂移率、一次通过率（并声明 `pass^k` 需 k 次独立采样、本域给不出）、只认 `source=host` 的 USD/卡与 USD/通过项、playbook 近重率代理；数据不足一律 `INSUFFICIENT`/`NA` | 脚本级只读统计；**样本不足不编数** | `metrics.selftest.sh` A-mt-01…07（8 项） |
+| H35 | `FLEX_RULES.branch_max`（缺省 0=关，子命令退 23）+ `scripts/flexbranch.py add/list/pick/audit`：分支产物只能在 `sandbox/`（越界退 22）、超数与重名退 24、只有 Verifier 能定选择（退 31）、理由 ≥20 字；结论只落成 `sandbox/proposals/BRANCH_PICK-*.md` 提案 + 账本事件 | 脚本级拦落点与角色；**判定面零写入**（`tasks.json`/`r-XX.json` 指纹不变） | `flexbranch.selftest.sh` A-fb-01…07（9 项） |
+| H36 | GOAL 可选段 `## TRIGGER`（缺省关，子命令退 23）+ `scripts/trigger.py decide/claim/release/status`：只在"有 ready 卡、预算未满、无待批项、未到 stop_phase、未触次数上限"时判 GO；锁防重复开会话；**不调任何宿主 API**，建会话由宿主做 | 脚本级决策；执行权在宿主 | `trigger.selftest.sh` A-tr-01…08（9 项） |
+| H31 | GOAL 可选段 `## VERIFY_ACL`（缺省关）+ `scripts/verifier.py declare/check/audit`：没声明、声明属上一轮、档位不在只读白名单 → 退 24，结论不得写进 `r-XX.json`；宿主缺 `session_mode` 原语时退 0 但打 **DEGRADED** | 脚本级拦声明与口径；**档位强制性属宿主级**，无原语时只是自报（提示词级） | `verifier.selftest.sh` A-va-01…07（7 项，含关闭态提示词逐字节一致） |
+| H22 | `templates/presets/{quickfix,feature,longrun}.md` 三档验收矩阵范式 + `init.sh --preset`（**追加**进 GOAL.md，不带参数逐字节不变）+ `dist/README.en.md` 英文入口。附带修复：`{{EPOCH}}` 此前无人替换，每份生成的 GOAL.md 都留原文 | 脚本级（非法档位退 2）；范式只是脚手架，判定仍来自冻结 `run.sh` | `preset.selftest.sh` A-pz-01…06（6 项，含"模板每个占位符都有替换项"） |
+
 ---
 
 ## 3. 新增：预算隔离
@@ -246,6 +313,8 @@ gate 脚本对工人只读，只有监督者可改且须留提交记录。
 - Explorer 结论进入判定。
 - Windows 原生 PowerShell 实现（未验证即不承诺）。
 - 自动执行远程技能里的命令、自动放行不可逆动作、自动安装远程 MCP。
+- 真·kill 运行中的子代理（宿主无原语，G3 只做超时记账）、flex 卡并行调度、
+  多工作区/跨机分布式调度（P2 的非目标，G10）。
 
 ## 11. 实现进度
 
@@ -260,3 +329,4 @@ gate 脚本对工人只读，只有监督者可改且须留提交记录。
 | 分发文档、迁移指南、中立化改造清单 | 已完成（一条技术债经 worker 实测证伪，已按实测改写，见 C3） |
 | 主规范（本文件） | 已完成，待元验收全过后转正式版 |
 | 02-SKILL-0.9.md（正式 SKILL.md 候选，含 E7/B8/M 系列） | 已完成，待 worker 交付后统一切换 |
+| P2 strict 卡 DAG 并发（G 组，默认关闭） | 已完成（`dag_scheduler.py` + `status.py task`；A-conc-01…10 自测全绿；关闭态 round_prompt 与 golden 逐字节一致） |

@@ -162,6 +162,91 @@ else
   bad "质量工具探测不对 :: on=$q_on off=$q_off"
 fi
 
+# E-H20: 运行时指纹（MANIFEST 保护不到解释器本身，漂移必须查得出）
+sh "$ENVIRON" probe --repo "$TMP" >/dev/null 2>&1
+if python3 - "$AP/environment.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+r = d.get("runtimes") or {}
+p = r.get("python3") or {}
+sys.exit(0 if p.get("path_digest") and p.get("sha256") and p.get("size") and p.get("version")
+         and "/" not in str(p.get("path_digest")) and not p.get("bin") else 1)
+PY
+then ok "probe 写出 python3 运行时指纹（路径摘要/大小/sha256/版本，且不含绝对路径）"
+else bad "runtimes 指纹不完整或泄漏绝对路径"; fi
+
+out=$(sh "$ENVIRON" runtimes --repo "$TMP" 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "ENV RUNTIMES 0"; then
+  ok "刚采集完再对一遍：无漂移退 0"
+else
+  bad "无漂移场景不该报错 :: rc=$rc $out"; fi
+
+python3 - "$AP/environment.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+d["runtimes"]["python3"]["path_digest"] = "000000000000"
+json.dump(d, open(p, "w", encoding="utf-8"))
+PY
+out=$(sh "$ENVIRON" runtimes --repo "$TMP" 2>&1); rc=$?
+if [ "$rc" = 41 ] && printf '%s' "$out" | grep -q "RUNTIME DRIFT python3"; then
+  ok "解释器换路径 → 退 41 并点名，且声明判定不自动改变"
+else
+  bad "运行时漂移没查出来 :: rc=$rc $out"; fi
+
+python3 - "$AP/environment.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+d.pop("runtimes", None)
+json.dump(d, open(p, "w", encoding="utf-8"))
+PY
+out=$(sh "$ENVIRON" runtimes --repo "$TMP" 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "没有 runtimes 指纹"; then
+  ok "老工作区没指纹时退 0 并提示重跑 probe"
+else
+  bad "缺 runtimes 的老工作区被误伤 :: rc=$rc $out"; fi
+
+# E17-E21: H20 执行期新增可执行文件探针
+REPO2="$TMP/execscan"; mkdir -p "$REPO2/.autopilot" "$REPO2/src" "$REPO2/node_modules/x" "$REPO2/dist"
+printf 'x\n' > "$REPO2/src/a.txt"
+out=$(sh "$ENVIRON" exec-scan --repo "$REPO2" 2>&1); rc=$?
+if [ "$rc" = 40 ] && printf '%s' "$out" | grep -q SKIP && ! printf '%s' "$out" | grep -q 'RESULT.*PASS'; then
+  ok "没有基线时判 SKIP（退 40），绝不回一个 PASS"
+else
+  bad "无基线行为不对 :: rc=$rc $out"; fi
+
+out=$(sh "$ENVIRON" exec-scan --repo "$REPO2" --record 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ -f "$REPO2/.autopilot/exec-scan.json" ]; then
+  ok "--record 落基线清单"
+else
+  bad "--record 没落盘 :: rc=$rc $out"; fi
+
+printf '#!/bin/sh\necho hi\n' > "$REPO2/src/drop.sh"; chmod +x "$REPO2/src/drop.sh"
+out=$(sh "$ENVIRON" exec-scan --repo "$REPO2" 2>&1); rc=$?
+if [ "$rc" = 42 ] && printf '%s' "$out" | grep -q "NEW EXEC src/drop.sh"; then
+  ok "执行期新增可执行文件被点名并退 42（验证阶段 curl 下来一个脚本就是这一类）"
+else
+  bad "新增可执行没抓到 :: rc=$rc $out"; fi
+
+printf '#!/bin/sh\n' > "$REPO2/node_modules/x/tool"; chmod +x "$REPO2/node_modules/x/tool"
+printf '#!/bin/sh\n' > "$REPO2/dist/bundle-bin"; chmod +x "$REPO2/dist/bundle-bin"
+rm -f "$REPO2/src/drop.sh"
+out=$(sh "$ENVIRON" exec-scan --repo "$REPO2" 2>&1); rc=$?
+if [ "$rc" = 0 ]; then
+  ok "依赖/产物目录里的可执行文件不进清单（跳过表生效，不会把 node_modules 报成投毒）"
+else
+  bad "跳过表没生效 :: rc=$rc $out"; fi
+
+chmod -x "$REPO2/src/keep.sh" 2>/dev/null; printf '#!/bin/sh\n' > "$REPO2/src/keep.sh"; chmod +x "$REPO2/src/keep.sh"
+sh "$ENVIRON" exec-scan --repo "$REPO2" --record >/dev/null 2>&1
+chmod -x "$REPO2/src/keep.sh"
+out=$(sh "$ENVIRON" exec-scan --repo "$REPO2" 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "EXEC REMOVED src/keep.sh"; then
+  ok "执行位被摘掉只提示不拦住（删痕迹也是信号），且不退 42 掩盖真正的新增"
+else
+  bad "摘执行位处理不对 :: rc=$rc $out"; fi
+
 printf '自检 %d 例，失败 %d\n' "$idx" "$fails"
 [ "$fails" = 0 ] || exit 1
 exit 0

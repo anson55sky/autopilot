@@ -27,6 +27,14 @@ if [ ! -f "$ENV_JSON" ]; then
   echo "提醒: 没有 $ENV_JSON，执行器将无法解析 {SKILL_ROOT}/{REPO_ROOT}；先跑 init.sh" >&2
 fi
 
+SKILL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# 只在 GOAL.CONCURRENT.enable=true 时追加并发段；关闭时输出必须与串行基线逐字节一致。
+CONC_ENABLED=$(python3 "$SKILL_DIR/scripts/dag_scheduler.py" config --repo "$REPO" --enabled 2>/dev/null || printf '0')
+case "$CONC_ENABLED" in
+  1) ;;
+  *) CONC_ENABLED=0 ;;
+esac
+
 PROMPT="$(cat <<EOF
 你是 autopilot 的第 ${ROUND} 轮执行器，全新上下文。
 
@@ -73,6 +81,62 @@ d. 续跑：只补剩余波次，已复核的不重做、不重派。
 最后一行只输出：ROUND ${ROUND} DONE 或 ROUND ${ROUND} BLOCKED <一句话原因>
 EOF
 )"
+
+if [ "$CONC_ENABLED" = "1" ]; then
+  CONC_BLOCK=$(cat <<'EOF'
+并发调度（GOAL.CONCURRENT.enable=true，P2）——以下覆盖上面第 1–3 步的派发方式：
+
+1. 先跑 python3 {SKILL_ROOT}/scripts/dag_scheduler.py recover --repo {REPO_ROOT}（超时只记账标 failed，不杀工人），再跑 plan --repo {REPO_ROOT}。
+2. 只派发 READY 行；DEFER 是写集冲突，BLOCKED 是依赖/epoch/Triage 未满足。每张卡：闸门 check → spend → dag_scheduler.py start --task T-x → 再用 Agent 派发；同一消息可并行多个工人。
+3. 工人只写卡内写集，绝不手改 tasks.json；每个 Agent 返回后先核对文件与回执，再 dag_scheduler.py finish --task T-x --status done|failed --note "..."。
+4. 并发数不得超过 plan 输出的 limit；退出码 21=槽位或并发上限，停止派发并等运行中的完成；22=写集冲突；23=开关未启用；24=状态或依赖不合法；20=锁超时。
+5. 所有 RUNNING 结束后（status 里 VERIFY-WINDOW open）才开验证窗口：批量验证 + 全量验收一轮只跑一次。
+6. flex 卡仍按原串行流程，不进调度器。
+EOF
+)
+  # 不能用 awk -v 传多行块：BSD awk 会报 "newline in string" 并吞掉整段提示词。
+  # 用 python 按标记插入，失败时保留原 PROMPT，绝不输出空提示词。
+  NEW_PROMPT=$(CONC_BLOCK="$CONC_BLOCK" PROMPT="$PROMPT" python3 - <<'PY'
+import os
+prompt = os.environ.get("PROMPT", "")
+block = os.environ.get("CONC_BLOCK", "")
+marker = "硬约束："
+if block and marker in prompt:
+    prompt = prompt.replace(marker, block + "\n\n" + marker, 1)
+print(prompt, end="")
+PY
+) || NEW_PROMPT=""
+  if [ -n "$NEW_PROMPT" ]; then
+    PROMPT="$NEW_PROMPT"
+  fi
+fi
+# H31：只在 GOAL.VERIFY_ACL.enable=true 时追加验证者权限段；关闭时输出与基线逐字节一致。
+VA_ENABLED=$(python3 "$SKILL_DIR/scripts/verifier.py" config --repo "$REPO" --enabled 2>/dev/null || printf '0')
+if [ "$VA_ENABLED" = "1" ]; then
+  VA_BLOCK=$(cat <<'EOF'
+验证者权限分级（GOAL.VERIFY_ACL.enable=true，H31）——补在上面第 5 步"独立验证者"之前：
+
+1. 每个 Verifier 在写 rounds/r-XX.json 之前先声明自己这一会话的权限档位：
+   python3 {SKILL_ROOT}/scripts/verifier.py declare --repo {REPO_ROOT} --task T-x --mode <只读档> --session <会话id>
+2. 出结论前必跑 verifier.py check --repo {REPO_ROOT} --task T-x；它退 24 时该卡结论**不得**写进 r-XX.json（没声明 / 声明是上一轮的 / 档位不在白名单）。
+3. check 打印 DEGRADED 说明宿主没有 session_mode 原语、档位只是执行器自报（提示词级）：REPORT 必须原样写降级声明，不许写成"权限已隔离"。
+4. 收轮前跑 verifier.py audit --repo {REPO_ROOT} --round N：有验证结论却没有对应声明 = 判定来源不明，本轮不得记 passed。
+EOF
+)
+  NEW_PROMPT=$(VA_BLOCK="$VA_BLOCK" PROMPT="$PROMPT" python3 - <<'PY'
+import os
+prompt = os.environ.get("PROMPT", "")
+block = os.environ.get("VA_BLOCK", "")
+marker = "硬约束："
+if block and marker in prompt:
+    prompt = prompt.replace(marker, block + "\n\n" + marker, 1)
+print(prompt, end="")
+PY
+) || NEW_PROMPT=""
+  if [ -n "$NEW_PROMPT" ]; then
+    PROMPT="$NEW_PROMPT"
+  fi
+fi
 
 # 不做占位符展开：展开会把本机绝对路径写进提示词产物（换机即断，且违反 M6）。
 printf '%s\n' "$PROMPT"

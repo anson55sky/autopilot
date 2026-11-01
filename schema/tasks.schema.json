@@ -119,6 +119,44 @@
           "minimum": 0,
           "description": "该卡被返工/重试过几次（status.py 用它推返工率）。缺省视为 0 次。"
         },
+        "read_set": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relpath" },
+          "description": "P2 并发：只读依赖文件。缺省空数组；不参与写集冲突判定，供规划与审计参考。"
+        },
+        "premise_tag": {
+          "type": "string",
+          "description": "P2 Triage：失败前提标签。同一标签两次失败后，第三次修法不得开工（F3）。"
+        },
+        "started_at": { "type": "string", "description": "P2 并发：开始时间（UTC ISO，带偏移）。串行卡缺省不写。" },
+        "ended_at": { "type": "string", "description": "P2 并发：结束时间（UTC ISO，带偏移）。" },
+        "session_id": { "type": "string", "description": "P2 并发：派发会话/工人标识，供审计。" },
+        "dispatch_round": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "P2 并发：第几次派发（轮次号），用于任务槽预算。串行卡缺省不写。"
+        },
+        "last_error": { "type": "string", "description": "P2 并发：最近一次失败原因（status.py task / 调度器写入）。" },
+        "closed_round": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "H12：该卡在第几轮被关闭。done 时由 dag_scheduler.finish 或 status.py task set 写入，供 close-round 对账 tasks_closed。"
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "H25：重派是否安全。false 的卡一旦有失败记录（attempts>0），未经人工放行不得再 start。缺省视为 true（兼容老工作区）。"
+        },
+        "est_assertions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "H10：本卡预计新增/改动的验收断言条数。>5 触发规模警告（建议拆波次），仅警告，不阻断判定。"
+        },
+        "est_changed_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "H10：本卡预计改动行数。>300 触发规模警告；工人单次输出触顶会零落盘，故拆波次。仅警告。"
+        },
         "requires_env": {
           "type": "array",
           "uniqueItems": true,

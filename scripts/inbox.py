@@ -48,6 +48,10 @@
   inbox.py approved <repo|--repo X> <I-id> [--json]         # is_approved(id)
   inbox.py count    <repo|--repo X>                          # 未决条数（status.py 用）
   inbox.py export   <repo|--repo X>                          # 生成 inbox.md
+  inbox.py verify   <repo|--repo X> --receipts <宿主回执.json> [--strict]
+                    # H3 二期：把声称的批准逐条对账到宿主导出的交互回执
+                    #   VERIFIED / GHOST-REF(退 24) / NOT-VERIFIED(退 30) / MISMATCH(退 24)
+                    #   本脚本不联网、不调宿主 API —— 回执文件由执行器导出后交给它核对
 """
 
 import datetime
@@ -269,7 +273,7 @@ def parse_opts(args, spec):
                 opts[key] = a.split("=", 1)[1]
                 i += 1
                 continue
-            if key in ("all", "json"):
+            if key in ("all", "json", "strict"):
                 opts[key] = True
                 i += 1
                 continue
@@ -439,6 +443,82 @@ def cmd_approved(root, iid, opts):
     return 0 if ok else 30
 
 
+AFFIRMATIVE = ("approve", "approved", "yes", "allow", "同意", "批准")
+
+
+def load_receipts(path):
+    """宿主交互回执清单（由执行器从宿主导出，本脚本不联网、不调宿主 API）。
+
+    接受 `[{...}]` 或 `{"receipts": [...]}`；每条至少要能取到一个可匹配的引用字段：
+    `interaction_id` / `id` / `ref`，可选 `decision` / `answer` / `by` / `session`。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except ValueError as exc:
+        return die("回执文件不是合法 JSON: %s" % exc, 2)
+    except OSError as exc:
+        return die("读不到回执文件: %s" % exc, 2)
+    rows = doc.get("receipts") if isinstance(doc, dict) else doc
+    if not isinstance(rows, list):
+        return die("回执文件形态不对：需要数组或 {\"receipts\": [...]} ", 2)
+    idx = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        for k in ("interaction_id", "id", "ref"):
+            v = (r.get(k) or "").strip()
+            if v:
+                idx[v] = r
+    return idx
+
+
+def cmd_verify(root, opts):
+    """H3 二期：把 inbox 里声称的批准逐条对账到宿主回执。"""
+    ap = os.path.join(root, ".autopilot")
+    idx = load_receipts(opts["receipts"])
+    if isinstance(idx, int):        # load_receipts 已经 die（die 会 exit，这里兜底）
+        return idx
+    items = current_items(load_events(ap))
+    answered = [i for i in items.values() if i["status"] == "answered"]
+    ghosts, unverified, mism, ok = [], [], [], []
+    for it in sorted(answered, key=lambda x: x["id"]):
+        iid, ref = it["id"], (it.get("ref") or "").strip()
+        if it.get("auth") == AUTH_LEGACY or not ref:
+            unverified.append((iid, "无引用/legacy 记录，视为未批准"))
+            continue
+        r = idx.get(ref)
+        if r is None:
+            ghosts.append((iid, ref, "回执里没有这个引用"))
+            continue
+        got = str(r.get("decision") or r.get("answer") or "").strip().lower()
+        if got and got not in AFFIRMATIVE and not any(a in got for a in AFFIRMATIVE):
+            mism.append((iid, ref, "回执显示的是「%s」不是肯定答复" % got))
+        else:
+            ok.append((iid, ref))
+    print("INBOX-VERIFY 已核对 %d 条声称答复：VERIFIED %d · GHOST-REF %d · NOT-VERIFIED %d · MISMATCH %d"
+          % (len(answered), len(ok), len(ghosts), len(unverified), len(mism)))
+    for iid, ref in ok:
+        print("  VERIFIED    %s  ref=%s" % (iid, ref))
+    for iid, ref, why in ghosts:
+        print("  GHOST-REF   %s  ref=%s :: %s（声称的批准对不上宿主回执 = 视同未批准）" % (iid, ref, why))
+    for iid, why in unverified:
+        print("  NOT-VERIFIED %s :: %s" % (iid, why))
+    for iid, ref, why in mism:
+        print("  MISMATCH    %s  ref=%s :: %s" % (iid, ref, why))
+    if opts.get("strict") and (ghosts or unverified or mism):
+        print("INBOX-VERIFY 24 --strict：有任何一条对不上就不放行")
+        return 24
+    if ghosts or mism:
+        print("INBOX-VERIFY 24 有 %d 条伪造/对不上（GHOST-REF+MISMATCH），相关不可逆动作不得执行"
+              % (len(ghosts) + len(mism)))
+        return 24
+    if unverified:
+        print("INBOX-VERIFY 30 其余 %d 条缺引用：按 B8 仍是未批准状态" % len(unverified))
+        return 30
+    return 0
+
+
 def cmd_count(root):
     ap = os.path.join(root, ".autopilot")
     items = current_items(load_events(ap))
@@ -483,6 +563,11 @@ def main():
         return (cmd_show if cmd == "show" else cmd_approved)(root, iid, opts)
     if cmd == "list":
         return cmd_list(root, opts)
+    if cmd == "verify":
+        if not opts.get("receipts"):
+            print('用法: inbox.py verify <repo> --receipts <宿主回执.json> [--strict]')
+            return 2
+        return cmd_verify(root, opts)
     if cmd == "count":
         return cmd_count(root)
     if cmd == "export":

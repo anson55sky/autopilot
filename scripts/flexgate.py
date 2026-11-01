@@ -63,6 +63,11 @@ DENY_PATTERNS = [
     (r"\bmail\b[^\n]*(-s|--send)|\bsmtp\b", "发邮件"),
     (r"\b(drop|truncate)\b\s+(table|database|schema)\b|\bdelete\s+from\b(?![^\n]*\bwhere\b)", "数据库破坏性语句"),
     (r"\b(security\s+find-internet-password|cat[^\n]*/\.ssh/|\.aws/credentials|\.env\b[^\n]*\b(cat|printenv|echo))", "读取凭据"),
+    # H20 验收通道完整性：判定用的解释器与 PATH 本身不在 MANIFEST 保护面内，
+    # 改动它们等于换掉尺子 —— 一律转待批，不许在工作区里直接做。
+    (r"\b(curl|wget)\b[^\n]*\|\s*(ba|z)?sh\b", "远程脚本直接执行"),
+    (r"\b(export\s+path=|path=[^\n]*:\$?path|path=[^\n]*(/usr/local/bin|/opt/homebrew|\.local/bin|node_modules/\.bin))", "改写 PATH / 注入可执行目录"),
+    (r"\b(chmod|chown|install)\b[^\n]*(/usr/(local/)?bin|/bin/|/opt/|\.local/bin)", "改动系统可执行文件"),
 ]
 
 

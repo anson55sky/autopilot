@@ -9,6 +9,11 @@
 - 对应验收：<!-- A1, A3 -->（flex 卡必须留空）
 - 完成定义：<!-- 外部可观察的行为 -->
 - 本地检查：<!-- 工人返回前必须跑的命令 -->
+- 规模估计：<!-- H10 可选：est_assertions=单卡新增/改动的验收断言条数（>5 触发警告）;
+  est_changed_lines=预计改动行数（>300 触发警告）。超限就拆顺序波次，契约外置到
+  rounds/r-XX-contract*.md —— 工人单次输出触顶会零落盘，实测过 -->
+- 重派安全性：<!-- H25 可选：idempotent=false 表示重跑会造成后果（迁移、写外部状态、发消息）；
+  这类卡一旦失败过，dag_scheduler start 会拒绝重派，需 --allow-non-idempotent --note 人工放行 -->
 
 ## 能力（discover.py match 得出；最多 3 技能 + 2 MCP + 1 智能体）
 

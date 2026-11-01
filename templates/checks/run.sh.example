@@ -52,6 +52,81 @@ print("" if v is None else str(v).lower() not in ("", "false", "0", "null"))' "$
   return 0
 }
 
+# H20 验收通道完整性：MANIFEST 保护的是 checks/ 里的文件，保护不到**跑判定的解释器本身**。
+# 换个 node、往 PATH 里塞个同名二进制，就能悄悄改变 RESULT。这里对一遍运行时指纹：
+#   漂移 → FAIL（尺子变了，这一批结果不可比）；没探测产物 → SKIP（不算绿也不算红）。
+# 用法: runtime_stable <A#>
+runtime_stable() {
+  local id="$1"
+  local envf="$ROOT/.autopilot/env.json"
+  if [ ! -f "$envf" ]; then
+    skip "$id" "缺 .autopilot/env.json（先跑 init.sh），无法核对运行时"
+    return 1
+  fi
+  local skill
+  skill=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("skill_root",""))' "$envf" 2>/dev/null)
+  if [ -z "$skill" ] || [ ! -f "$skill/scripts/environ.py" ]; then
+    skip "$id" "找不到 environ.py，无法核对运行时"
+    return 1
+  fi
+  local out rc
+  out=$(python3 "$skill/scripts/environ.py" runtimes --repo "$ROOT" 2>&1)
+  rc=$?
+  if [ "$rc" = 0 ]; then
+    printf 'RESULT %s PASS 运行时指纹与采集时点一致\n' "$id"
+    return 0
+  fi
+  if [ "$rc" = 41 ]; then
+    fail=1
+    printf 'RESULT %s FAIL 运行时漂移（尺子变了）:: %s\n' "$id" "$(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"
+    return 1
+  fi
+  skip "$id" "运行时对账无法执行（rc=$rc）"
+  return 1
+}
+
+# H20 执行期探针：本轮有没有"多出"可执行文件（验证阶段的下载投毒就属于这一类）。
+# 用法: no_new_executables <A#>
+# 基线在 freeze 之后打一次：environ.py exec-scan --repo <项目> --record
+no_new_executables() {
+  _id="$1"
+  _envf="$ROOT/.autopilot/env.json"
+  if [ ! -f "$_envf" ]; then
+    skip "$_id" "缺 .autopilot/env.json，无法定位 environ.py"
+    return 1
+  fi
+  _skill=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("skill_root",""))' "$_envf" 2>/dev/null)
+  if [ -z "$_skill" ] || [ ! -f "$_skill/scripts/environ.py" ]; then
+    skip "$_id" "找不到 environ.py，无法核对可执行清单"
+    return 1
+  fi
+  _out=$(python3 "$_skill/scripts/environ.py" exec-scan --repo "$ROOT" 2>&1)
+  _rc=$?
+  if [ "$_rc" = 0 ]; then
+    printf 'RESULT %s PASS %s\n' "$_id" "$(printf '%s' "$_out" | tail -n 1)"
+    return 0
+  fi
+  if [ "$_rc" = 42 ]; then
+    fail=1
+    printf 'RESULT %s FAIL 执行期新增可执行文件 :: %s\n' "$_id" "$(printf '%s' "$_out" | grep 'NEW EXEC' | head -3 | tr '\n' ' ')"
+    return 1
+  fi
+  skip "$_id" "没有可执行清单基线（先跑 exec-scan --record）——判不了就不判，不给 PASS"
+  return 1
+}
+
+# H33 视觉证据：DOM 浮层与 canvas HUD 的几何相交（配 probe-geometry.mjs 用）。
+# 页面必须把换算到 canvas 坐标的矩形写进 <script id="autopilot-geometry">，否则本项判 SKIP：
+#   check A26 "浮层不得压住 HUD" sh -c "\"$CHROME\" --headless=new --dump-dom \"$URL\" > .autopilot/checks/geom.html
+#         && node .autopilot/checks/probe-geometry.mjs A26 .autopilot/checks/geom.html 0"
+#         # probe 退 3 = 没有几何数据 → 由调用方改写为 skip，绝不给 PASS
+
+# H33② 像素基线对照：与已批准的基线图比像素差占比（零依赖，自己解 PNG）。
+#   check A27 "主界面渲染与基线一致" python3 {SKILL_ROOT}/tools/pixel_diff.py \
+#       --baseline .autopilot/baseline/home.png --current .autopilot/checks/home.png \
+#       --threshold 0.002 --mask 560,8,120,24      # 遮掉右上角计时器这类动态区
+#       # pixel_diff 退 3 = 图解不出/尺寸不一致 → 调用方改 skip；退 1 = FAIL；退 0 = PASS
+
 # TODO-check: 每条验收一行，替换成真实检查后删除本行
 check A1 "构建通过" npm run build
 check A2 "测试通过" npm test -- --run
