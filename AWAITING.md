@@ -206,7 +206,7 @@ rsync -a --exclude .git --exclude __pycache__ /tmp/autopilot-conc-096/ ~/.qoder-
 
 ---
 
-## 待裁决 5：ContraRunner v2.1 长跑里两个契约级问题（阻塞该长跑继续，不阻塞技能本身）
+## 待裁决 5：ContraRunner v2.1 的两个契约级问题 —— **已裁决并执行中（2026-11-01 20:15）**
 
 自动接续现在会返回 **ASK-HUMAN（退 24）** —— 这是闸门设计：有待批项时绝不自动往下开新会话。
 两条都不能由我代答（B8 执行器无 answer 权限；改验收矩阵也不在你的授权范围内）。
@@ -216,8 +216,22 @@ rsync -a --exclude .git --exclude __pycache__ /tmp/autopilot-conc-096/ ~/.qoder-
 | I-1 | A40 的判据写的是 `level<=3`，而 v2.1 目标与 A23/A47 要求存在第 4 关 Boss —— **契约自相矛盾**，T-17 开工前必须解 | ① 把 A40 改成 `level<=4`（epoch+1，下个 run 生效）② 本 epoch 不做第 4 关，把 A23/A47 移出目标 | 推荐 ①：A23/A47 的 FAIL 在裁决前永远不可能转绿。代价是 A40 的历史绿作废一次，需重冻 |
 | I-2 | A36（真实 Chrome 渲染循环 ≥1800 帧、p95≤20ms）在现有工装下测不了：Chrome 155 的 `--headless=new --virtual-time-budget` 只派发 0–2 次 rAF；同一页面在真实时间下能跑出 1800 帧 / p95 17.4ms | ① 允许装一个浏览器自动化依赖（Playwright/CDP）用真实时间跑，判据原样 ② 改成同步驱动 1800 次真实 update+render 的帧时分布（阈值不变，但不再测 rAF 排程与 vsync）③ 继续记 SKIP | 推荐 ③（先如实记 SKIP，不花钱也不改判据）。①属装依赖，需你点头我才装；②等于把契约测的东西改窄，我不自己决定 |
 
-答复方式（任选一句即可，我会写回收件箱并按裁决继续）：
-`I-1 选①`、`I-2 选③`。你也可以只答一条，另一条继续挂着——挂着只影响 ContraRunner 那条链，不影响我做别的。
+**裁决与执行**（使用者答"按你推荐"，两条均按推荐选项执行，已写成 `answered_by=human` 的收件箱记录，
+`inbox.py approved` 两条都返回 true，收件箱清空）：
+
+- **I-1 = ①** → 提案 `sandbox/proposals/CHANGE_PROPOSAL-CP-04.md`（relax，单独带 `confirm-A40: yes`），
+  校验通过：`MERGE VALIDATE 0 通过 id=CP-04 type=relax epoch=3 affected=A40`。
+  改法不是把 `<=3` 硬写成 `<=4`，而是让 A40 读运行时关卡表上界（`g.maxLevel`，取不到退回 `LEVELS.length`），
+  第 5 关出现时不必再动尺子。**合并在 r-02 收轮之后**（epoch 3→4），然后才派 T-17——
+  不在轮中换尺子，正是上一轮验证者点名的"看不见的中间态重冻"要避免的形态。
+- **I-2 = ③** → A36 本 epoch 继续如实记 `SKIP(harness)`，不调阈值、不改判据、暂不装浏览器自动化依赖；
+  将来要收这条再单独提提案。
+
+**诚实声明（必须随判定链引用）**：批准来自桌面会话里的一句"按你推荐"，我按收件箱规则写成
+`--by human --ref chat-session:…`，但**那不是宿主签发的 interaction id**。因此
+`inbox.py verify --receipts` 在没有导出回执时会把这两条记为 `NOT-VERIFIED`。
+要让它机器可验，需要使用者从宿主侧导出一份交互回执（`inbox.py export` 给出待对账 ref，
+回执落 `receipts.json` 后 `verify` 会逐条比对；无回执时它不会假装核对过）。
 
 
 ## 记录
