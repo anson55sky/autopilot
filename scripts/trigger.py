@@ -85,6 +85,35 @@ def lock_info(repo):
         return None
 
 
+def count_ready(repo):
+    """ready 卡数。口径单一来源：开着并发就用 dag_scheduler plan 的 READY 行，
+    否则退回 tasks.json 静态判定（status=ready，或 status=pending 且依赖全部 done）。"""
+    plan = os.path.join(SCRIPT_DIR, "dag_scheduler.py")
+    if os.path.exists(plan):
+        import subprocess
+        try:
+            out = subprocess.run([sys.executable, plan, "plan", "--repo", repo],
+                                 capture_output=True, text=True, timeout=60)
+            if out.returncode == 0:
+                n = sum(1 for ln in (out.stdout or "").splitlines() if ln.strip().startswith("READY"))
+                if n or "READY" in (out.stdout or ""):
+                    return n, "dag_scheduler plan 的 READY 行"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    doc = load_json(os.path.join(ap_of(repo), "tasks.json"), {}) or {}
+    tasks = doc.get("tasks") if isinstance(doc, dict) else None
+    done = {t.get("id") for t in (tasks or []) if isinstance(t, dict) and str(t.get("status")) in ("done", "closed")}
+    n = 0
+    for t in (tasks or []):
+        if not isinstance(t, dict):
+            continue
+        st = str(t.get("status"))
+        deps = t.get("depends_on") or t.get("deps") or []
+        if st == "ready" or (st == "pending" and all(dp in done for dp in deps)):
+            n += 1
+    return n, "tasks.json 静态判定（status=ready，或 pending 且依赖全 done）"
+
+
 def open_inbox_count(repo):
     """待批项数量。数据源与 inbox.py 一致：`.autopilot/inbox.jsonl` 里 state=open 的行。"""
     p = os.path.join(ap_of(repo), "inbox.jsonl")
@@ -140,19 +169,14 @@ def cmd_decide(a):
     if pend:
         reasons.append("有待批项 %d 条：自动接续**不得**处理不可逆动作，先等人" % pend)
         code = E_ASK_HUMAN
-    ready = 0
-    if status_mod:
-        tasks = status_mod.load_json(os.path.join(ap_of(repo), "tasks.json"), {}) or {}
-        for t in (tasks.get("tasks") or []) if isinstance(tasks, dict) else []:
-            if isinstance(t, dict) and t.get("status") == "ready":
-                ready += 1
+    ready, ready_source = count_ready(repo)
     if code == E_OK and not ready:
         reasons.append("没有 ready 卡（可能都在跑或都关了）：先跑 dag_scheduler.py plan 再决定")
         code = E_NO_WORK
     verdict = {E_OK: "GO", E_NO_WORK: "HOLD", E_BUSY: "BUSY",
                E_CAP: "STOP", E_ASK_HUMAN: "ASK-HUMAN"}.get(code, "HOLD")
     doc = {"decision": verdict, "round": cfg["round"], "ready_tasks": ready,
-           "ready_source": "tasks.json 里 status=ready 的静态计数（并发开着时以 dag_scheduler.py plan 的 READY 为准）",
+           "ready_source": ready_source,
            "auto_sessions_used": auto, "auto_sessions_cap": int(cfg["max_auto_sessions"]),
            "phase": state.get("phase"), "pending_inbox": pend,
            "reasons": reasons or ["条件齐备：可以开第 %d 轮" % cfg["round"]],
