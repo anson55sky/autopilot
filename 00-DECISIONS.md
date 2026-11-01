@@ -302,11 +302,13 @@
   独立采样，一个 run 内每卡只走一遍，输出里连"要怎么采"都写明了（`how_to_measure_passk`）；
   ③ 成本只累加 `{"type":"usage","source":"host"}`，`source=self-estimate` 一律不进判定数字，
   宿主没上报就打 `NA（宿主未上报，不自估）`；给出 USD/关闭卡、USD/通过项、工具调用数；
-  ④ 召回命中率**只给代理口径**（playbook 前缀近重率）并写明"真命中率需宿主召回日志"。
+  ④ 召回命中率**只给代理口径**（playbook 前缀近重率）并写明"真命中率需宿主召回日志"；
+  ⑤ 判定覆盖率（契约 N 条里多少条真有判定源、多少条只写在判定文件里却没进 `*_IDS` 兜底数组）与
+  漂移率并列进 `summary`——**分母必须用契约条数**：`17/17 全绿`那种错觉，正是拿已判定的条数当分母造出来的。
   **未做（不声称做了）**：固定价目表的 21 对 model-harness × 30 题 × 3 次成本基准（HarnessTax 协议）
   与题库（SWE-Marathon / Terminal-Bench 4.0 / Aider Polyglot）——这需要真实多 run 采样与外部依赖，
   现在写数字就是造假；禁令照旧：**不引用自建记忆或自报分数**（Graphiti 自评 84.4% → 复现 75.14%）。
-  证据：`scripts/metrics.selftest.sh` A-mt-01…07（8 项，含"空工作区不许出现数字""换基线不计入漂移"
+  证据：`scripts/metrics.selftest.sh` A-mt-01…09（10 项，含"空工作区不许出现数字""换基线不计入漂移"
   "自估成本不进数"）+ `scripts/status.py metrics`（rework_rate / max_parallel 口径已在此）+ 本文 H29
 - **H20 验收通道完整性（部分已实现，安全类）。** `MANIFEST.sha256` 只保护 `checks/` 内的文件，
   **不保护被调用的解释器与二进制**（`node` / `bash` / `python3` / Chrome）与 `PATH`。业界实证很硬：
@@ -465,8 +467,10 @@
   ③ 分批冻结走 `--allow-partial "<≥20 字理由>"`：短理由退 24，够长理由放行并落
   `{"type":"coverage_partial"}` 账本，REPORT 必须声明本 epoch 覆盖不完整；
   ④ GOAL 没有矩阵行（0.8 老工作区、刚 init）时完全不介入。
-  实测在真实工作区上立刻跑出比人工核对更准的数：**契约 47 / 冻结面命中 31 / 缺 16**（我此前手工
-  按数组数出来的"缺 30 条"混用了两种口径，H38 把它拆成"完全无判定源 16 条 + 有断言但未纳数组"）。
+  实测在真实工作区上立刻跑出比人工核对更准的数：**契约 47 / 冻结面命中 31 / 缺 16 / WEAK 14**
+  （健康工作区 WavePeek 12/12、数组全覆盖 → 零误报；同一口径已进 `metrics.py summary`
+  的「判定覆盖率」行）。我此前手工按数组数出的"缺 30 条"混用了两种口径，H38 把它拆成
+  "完全无判定源 16 条 + 有断言但未纳数组 14 条"，已以 H38 输出为准更正。
   证据：`scripts/status.selftest.sh` 例 15（6 项断言）；`tools/e2e-smoke.sh` 22/22 与
   `tools/migration_rehearsal.sh` 16/16 在新闸门下仍然全绿（老流程不被打断）
 
@@ -509,9 +513,9 @@
 | 无容器/microVM 隔离 | 清/竞 | H13 + H27 | 已实现（默认关） | 模式 B 一直在；A 由 `sandbox.py probe` 探测，探不到判 SKIP 并出 DEGRADE；读拒绝按角色分档 |
 | 无观测看板 | 清/竞 | H15 | **已实现（只读、单文件、零外部引用）** | `tools/dashboard.py`，A-db-01…05 含「除 dashboard/ 外一字未动」 |
 | 无一键审计证据包 | 清 | H16 | **已实现（脚本级）** | `export.py pack/verify`：脱敏 + sha256 清单，事后篡改可查（A-ex-01…04） |
-| token 不可自观测、无美元硬闸 | 清/竞 | H8 + H23 | 待做 | 宿主上报才参与判定 |
+| token 不可自观测、无美元硬闸 | 清/竞 | H8 + H23 | **已实现** | `status.py budget` 只准收紧；成本只认 `source=host`，自估不进判定（status 自检例 13） |
 | 单工作区、单人、无多人审批 | 清/竞 | H17 | **非目标** | 需真实需求另裁 |
-| 并发只在 strict、无 flex 并行、无真 kill | 清 | H6 + G4/G10 | **部分已实现** | KILL-LIST 已实现（A-conc-11）；flex 多分支对比=H35 待做 |
+| 并发只在 strict、无 flex 并行、无真 kill | 清 | H6 + G4/G10 | **部分已实现** | KILL-LIST（A-conc-11）+ flex 多分支对比（H35 `flexbranch.selftest.sh` 9 项）已上线；脚本仍不杀工人 |
 | 并发规模上限不显式 | 竞 | H26 | **已实现（脚本级）** | `plan/status/config` 打印 `limit_from` 与 `kill=`（A-conc-11） |
 | playbook 召回命中率无度量 | 清/竞 | H19 + H24 | 🟡 部分已实现 | 召回上限已从条数**加**字符双闸（`recall --max-chars`）+ 失效链 `invalidate/sup` 已上线；命中率与整理仍未做，归 H19 |
 | 记忆缺失效链（何时开始/失效） | 研 | H24 | 待做 | bi-temporal `valid_at/invalid_at` |

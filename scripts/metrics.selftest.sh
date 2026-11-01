@@ -109,6 +109,29 @@ else
   fail 7 "--json 不可解析：$j"
 fi
 
+# ---------------------------------------------------------------- A-mt-08/09 判定覆盖率
+R2="$TMP/cov"; mkdir -p "$R2/.autopilot/checks"
+printf '{"schema":2,"rounds_used":1,"phase":"build"}\n' > "$R2/.autopilot/state.json"
+{
+  printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| --- | --- | --- |\n'
+  printf '| A1 | x | y |\n| A2 | x | y |\n| A3 | x | y |\n'
+} > "$R2/.autopilot/GOAL.md"
+printf '%s\n' '#!/bin/sh' 'NODE_IDS=(A1)' 'echo "RESULT A1 PASS ok"' 'echo "RESULT A2 PASS ok"' \
+  > "$R2/.autopilot/checks/run.sh"
+out=$($PY "$M" summary --repo "$R2" 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "判定覆盖率：2/3 有判定源" \
+   && printf '%s' "$out" | grep -q "未纳入数组 1" && printf '%s' "$out" | grep -q "完全无判定源 1"; then
+  pass 8 "覆盖率进小结：分母是契约条数，不是已判定的条数（17/17 那种错觉就此消失）"
+else
+  fail 8 "覆盖率口径不对：rc=$rc $(printf '%s' "$out" | sed -n '2p')"
+fi
+j=$($PY "$M" summary --repo "$R2" --json 2>&1 | grep '^{' | tail -1)
+if printf '%s' "$j" | "$PY" -c 'import json,sys;d=json.load(sys.stdin)["coverage"];assert d["contract_items"]==3 and d["no_source"]==["A3"] and d["weak_not_in_arrays"]==["A2"], d' 2>/dev/null; then
+  pass 9 "--json 里 coverage 分得清「无判定源」与「有断言但未纳入兜底数组」两类缺口"
+else
+  fail 9 "json coverage 字段不对：$j"
+fi
+
 if [ "$FAILED" -gt 0 ]; then
   printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"
   exit 1

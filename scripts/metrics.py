@@ -244,13 +244,41 @@ def cmd_cost(a):
     return E_OK if p else E_INSUFFICIENT
 
 
+def coverage_block(repo):
+    """判定覆盖率：契约条目里有多少真的能在冻结面里找到判定源（H38 同源口径，不另算一套）。
+
+    为什么放进度量里：ContraRunner 报告写"17/17 全绿"时，契约其实是 47 条——
+    分母用错，进度就好看了一倍。覆盖率必须和漂移率、成本并列，而不是等人去翻 run.sh。
+    """
+    ap = os.path.join(os.path.abspath(repo), ".autopilot")
+    if status_mod is None:
+        return {"note": "status.py 不可用，覆盖率不单独计量"}
+    ids = status_mod.acceptance_ids(ap)
+    if not ids:
+        return {"contract_items": 0, "note": "GOAL 无矩阵行"}
+    sources, _ = status_mod.judging_sources(ap)
+    declared = status_mod.declared_ids(ap)
+    covered = [i for i in ids if i in sources]
+    missing = [i for i in ids if i not in sources]
+    weak = sorted(set(covered) - declared, key=lambda x: int(x[1:]))
+    return {"contract_items": len(ids), "with_source": len(covered),
+            "ratio": round(float(len(covered)) / len(ids), 4),
+            "protected_by_arrays": len(set(covered) & declared),
+            "weak_not_in_arrays": weak, "no_source": missing}
+
+
 def cmd_summary(a):
     repo = os.path.abspath(a.repo)
     d = drift_rate(repo)
     c = cost_metrics(repo)
     p = first_try_rate(repo)
     r = recall_dup_rate(repo)
+    cov = coverage_block(repo)
     lines = [
+        "判定覆盖率：%d/%d 有判定源（其中 %d 条进 run.sh 兜底数组）；未纳入数组 %d 条；完全无判定源 %d 条"
+        % (cov.get("with_source", 0), cov.get("contract_items", 0),
+           cov.get("protected_by_arrays", 0), len(cov.get("weak_not_in_arrays") or []),
+           len(cov.get("no_source") or [])),
         "判定漂移：%s" % ("INSUFFICIENT（同基线无可比序列）" if d["rate"] is None
                           else "%.1f%%（%d/%d 次对比翻转）" % (d["rate"] * 100.0, d["flips"], d["comparisons"])),
         "通过口径：%s" % ("INSUFFICIENT（没有已关闭的卡）" if not p else
@@ -261,13 +289,16 @@ def cmd_summary(a):
         "重复踩坑代理：%s" % ("无 playbook" if not r.get("entries") else
                               "%d 条记录里近重 %d 条（代理口径，非真命中率）"
                               % (r["entries"], r.get("near_duplicates") or 0)),
+        ("⚠ 覆盖不完整：本 run 的分母不该用「已判定的条数」，得用契约的 %d 条"
+         % cov["contract_items"]) if cov.get("no_source") or cov.get("weak_not_in_arrays") else
+        "覆盖完整：契约每条都有判定源且在兜底数组内",
         "声明：本模块只统计已发生的事实；模型层指标需真实 run 样本，样本不足一律 INSUFFICIENT。",
     ]
     print("METRICS 0 度量小结（%s）" % os.path.basename(repo))
     for ln in lines:
         print("  " + ln)
     if a.json:
-        print(json.dumps({"drift": d, "cost": c, "first_try": p, "recall_proxy": r},
+        print(json.dumps({"drift": d, "cost": c, "first_try": p, "coverage": cov, "recall_proxy": r},
                          ensure_ascii=False, sort_keys=True))
     return E_OK
 
