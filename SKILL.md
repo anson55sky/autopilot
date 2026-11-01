@@ -294,6 +294,7 @@ python3 $SKILL/scripts/sandbox.py probe --repo $REPO                    # H13 �
 python3 $SKILL/scripts/sandbox.py check-read --repo $REPO --role builder --path $HOME/.config/gh/hosts.yml   # H27 读拒绝（退 24）
 python3 $SKILL/scripts/trigger.py decide --repo $REPO   # H36 宿主定时器问一句：该不该开下一轮（会话仍由宿主开）
 python3 $SKILL/scripts/trigger.py claim --repo $REPO --session <id> && ... && python3 $SKILL/scripts/trigger.py release --repo $REPO
+python3 $SKILL/scripts/trigger.py release --repo $REPO --if-stale   # 看门狗：只在超 TTL 或 claim 后账本零活动才解锁（H36）
 python3 $SKILL/scripts/flexbranch.py add  --repo $REPO --task T-04 --name lazy --target sandbox/T-04/lazy   # H35 多分支对比（FLEX_RULES.branch_max>0 才启用）
 python3 $SKILL/scripts/flexbranch.py pick --repo $REPO --task T-04 --choose lazy --by verifier --note "冻结矩阵里只有它能过…"   # 只写提案，不进 r-XX.passed
 python3 $SKILL/scripts/metrics.py summary --repo $REPO            # H19 漂移率/一次通过率/宿主成本；样本不足打 INSUFFICIENT

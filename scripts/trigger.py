@@ -17,11 +17,19 @@ stop_phase        = report    # 到该阶段就不再自动接续
 用法:
   python3 scripts/trigger.py decide --repo <工作区> [--json]
   python3 scripts/trigger.py claim  --repo <工作区> --session <宿主会话id>
-  python3 scripts/trigger.py release --repo <工作区>
+  python3 scripts/trigger.py release --repo <工作区> [--if-stale]
   python3 scripts/trigger.py status  --repo <工作区>
 
+看门狗：占位的会话如果没自己 release（进程被取消、上下文被压缩、91 秒就退出），
+`decide / claim / release --if-stale` 三处共用同一个判据（stale_reason）机器判定能不能解锁：
+**claim 之后账本零活动**（`auto_round` 自身不算活动）且超过一个节拍，或超 TTL 且仍零活动。
+有活动就一律退 20 不抢——哪怕已经超 TTL：长轮次本来就可能跑很久，两个会话写同一轮的代价
+（重复派发、账本互踩、假 PASS）比"链停下来等人"高。真要强行解锁，是人执行不带
+--if-stale 的 `release`。
+
 退出码：0 该接续（已给出派发要素）· 10 不该接续（没活/已到阶段/预算将满）·
-20 已有会话在跑（锁被占，**不要重复开**）· 21 自动接续次数触顶 · 23 未启用 · 24 需要人工批准（有待批项）。
+20 已有会话在跑（锁被占，**不要重复开**；`release --if-stale` 也用这个码表示"还不该解"）·
+21 自动接续次数触顶 · 23 未启用 · 24 需要人工批准（有待批项）。
 """
 
 import argparse
@@ -83,6 +91,63 @@ def lock_info(repo):
             return json.load(fh)
     except (OSError, ValueError):
         return None
+
+
+def activity_since(repo, since_epoch):
+    """claim 之后账本里有没有别的活动（任务开工、闸门核销、工人收执、收轮）。
+
+    只数 `auto_round` 以外的事件——占位本身不是干活。用来把「会话还在跑」与
+    「claim 完就跑路」分开：前者不许抢锁，后者让无人值守那一跳能自己解开，
+    而不是干等到 TTL（实测 ContraRunner 就卡过一次：占位的会话 91 秒就结束，
+    下一跳每 30 分钟敲一次都判 BUSY，白等一个半小时）。
+    """
+    if not status_mod:
+        return None
+    try:
+        events = status_mod.read_ledger(ap_of(repo))
+    except OSError:
+        return None
+    n = 0
+    for e in events:
+        if not isinstance(e, dict) or e.get("type") == "auto_round":
+            continue
+        ts = status_mod.parse_ts(e.get("ts"))
+        if ts is None:
+            continue
+        if ts.timestamp() >= since_epoch - 1:      # 容 1 秒：claim 与首条事件常同秒
+            n += 1
+    return n
+
+
+def ttl_minutes(cfg):
+    """陈旧锁的最长持有时间：3 个节拍，最少 3 分钟（口径唯一，decide/claim/release 共用）。"""
+    return max(3, int(cfg["interval_min"])) * 3
+
+
+def stale_reason(cfg, repo, lk):
+    """该不该解锁。返回 (判据种类, 说明)；种类为空串表示**不许自动解**。
+
+    只承认两种可以自动解的情形，共同点是「账本能证明这个会话没在干活」：
+      idle —— 超过一个节拍且 claim 之后除 auto_round 外零事件（实测就是这个把链卡死的）；
+      ttl  —— 超过 TTL 且仍然零活动（读不到账本时也只在超 TTL 后才敢按此放行）。
+    反过来，**有活动就没资格自动解**，哪怕已经超 TTL：长轮次本来就可能跑很久，
+    抢锁的代价是两个会话同时写同一轮（重复派发、账本互踩），
+    比"链停下来等人"更糟。这种情形由人工 `release`（不带 --if-stale）兜底。
+    """
+    interval = max(1, int(cfg["interval_min"]))
+    ttl = ttl_minutes(cfg)
+    claimed = float(lk.get("ts") or 0)
+    age_min = (time.time() - claimed) / 60.0
+    acts = activity_since(repo, claimed)
+    if acts is None:
+        return ("ttl", "超过 TTL %d 分钟且读不到账本，按陈旧处理" % ttl) if age_min >= ttl else ("", "")
+    if acts:
+        return ("", "")
+    if age_min >= ttl:
+        return ("ttl", "超过 TTL %d 分钟且账本零活动" % ttl)
+    if age_min >= interval:
+        return ("idle", "claim 后 %d 分钟账本零活动（会话多半已退出而没 release）" % int(age_min))
+    return ("", "")
 
 
 def count_ready(repo):
@@ -151,10 +216,21 @@ def cmd_decide(a):
     lk = lock_info(repo)
     if lk:
         age_min = (time.time() - float(lk.get("ts") or 0)) / 60.0
-        stale_after = max(3, int(cfg["interval_min"])) * 3
-        if age_min < stale_after:
-            reasons.append("已有自动会话在跑（%s，%d 分钟前 claim）——不要重复开会话" % (
-                lk.get("session") or "?", int(age_min)))
+        kind, why = stale_reason(cfg, repo, lk)
+        if kind:
+            reasons.append("锁看门狗判为陈旧（%s，claim %d 分钟，%s）：可以解锁后开第 %d 轮，"
+                           "release --if-stale 只做机器确认过的解锁" % (
+                               lk.get("session") or "?", int(age_min), why, cfg["round"]))
+        elif age_min < ttl_minutes(cfg):
+            reasons.append("已有自动会话在跑（%s，%d 分钟前 claim）——不要重复开会话；"
+                           "看门狗没发现它失联，所以不给你解锁命令" % (
+                               lk.get("session") or "?", int(age_min)))
+            code = E_BUSY
+        else:
+            reasons.append("锁已超 TTL（claim %d 分钟）但 claim 后账本有活动，"
+                           "无法确认那个会话是否还活着：自动接续**宁停不抢**（退 20）。"
+                           "两个会话写同一轮的代价比链停下来等人高——"
+                           "确认它死了再由人执行不带 --if-stale 的 release" % int(age_min))
             code = E_BUSY
     if str(state.get("phase") or "") == str(cfg["stop_phase"]):
         reasons.append("已到阶段 %s，自动接续停止，交回人工" % cfg["stop_phase"])
@@ -202,11 +278,14 @@ def cmd_claim(a):
         return E_DISABLED
     lk = lock_info(repo)
     if lk:
-        age_min = (time.time() - float(lk.get("ts") or 0)) / 60.0
-        if age_min < max(3, int(cfg["interval_min"])) * 3:
-            print("TRIGGER 20 锁还在（%d 分钟前由 %s claim）：不重复占位"
-                  % (int(age_min), lk.get("session") or "?"))
+        kind, _why = stale_reason(cfg, repo, lk)
+        if not kind:
+            age_min = int((time.time() - float(lk.get("ts") or 0)) / 60.0)
+            print("TRIGGER 20 锁还在（%d 分钟前由 %s claim，看门狗没发现它失联）：不重复占位。"
+                  "确实那一轮已经死了，就先跑 release --if-stale（它只做机器确认过的解锁）"
+                  % (age_min, lk.get("session") or "?"))
             return E_BUSY
+        print("TRIGGER 0 旧锁由看门狗判为陈旧（%s），直接改占" % _why)
     auto = len(read_ledger_events(repo, "auto_round"))
     if cfg["max_auto_sessions"] and auto >= int(cfg["max_auto_sessions"]):
         print("TRIGGER 21 自动接续已到上限 %s 次，停手等人" % cfg["max_auto_sessions"])
@@ -229,6 +308,33 @@ def cmd_release(a):
     if not guard(cfg):
         return E_DISABLED
     p = os.path.join(ap_of(repo), LOCK)
+    lk = lock_info(repo)
+    if getattr(a, "if_stale", False):
+        if not lk:
+            print("TRIGGER 0 没有锁（幂等：重复 release 不报错）")
+            return E_OK
+        kind, why = stale_reason(cfg, repo, lk)
+        if not kind:
+            age = int((time.time() - float(lk.get("ts") or 0)) / 60.0)
+            acts = activity_since(repo, float(lk.get("ts") or 0)) or 0
+            if age >= ttl_minutes(cfg):
+                print("TRIGGER 20 锁已超 TTL（claim %d 分钟）但账本有 %d 条活动："
+                      "宁停不抢——两个会话写同一轮的代价比链停下来等人高。"
+                      "确认那一轮真的死了，再由人（或控制器）执行不带 --if-stale 的 release"
+                      % (age, acts))
+            else:
+                print("TRIGGER 20 锁不该释放（claim %d 分钟前，session=%s，claim 后账本有 %d 条活动）："
+                      "别抢正在干活的会话" % (age, lk.get("session") or "?", acts))
+            return E_BUSY
+        os.remove(p)
+        print("TRIGGER 0 陈旧锁已释放：%s（原 session=%s，轮 %s）。"
+              "若那个会话其实还活着，请它自己 release；本脚本不碰宿主 API，也不建会话"
+              % (why, lk.get("session") or "?", lk.get("round")))
+        if status_mod:
+            status_mod.append_ledger(ap_of(repo), {"type": "auto_round_released",
+                                                  "session": lk.get("session") or "",
+                                                  "round": lk.get("round"), "reason": why})
+        return E_OK
     if os.path.exists(p):
         os.remove(p)
         print("TRIGGER 0 锁已释放，下一跳可以接续")
@@ -254,6 +360,7 @@ def cmd_status(a):
 def main():
     ap = argparse.ArgumentParser(prog="trigger.py")
     sub = ap.add_subparsers(dest="cmd")
+    parsers = {}
     for name, fn in (("decide", cmd_decide), ("claim", cmd_claim),
                      ("release", cmd_release), ("status", cmd_status)):
         p = sub.add_parser(name)
@@ -261,6 +368,10 @@ def main():
         p.add_argument("--session", default="")
         p.add_argument("--json", action="store_true")
         p.set_defaults(fn=fn)
+        parsers[name] = p
+    parsers["release"].add_argument(
+        "--if-stale", action="store_true",
+        help="只解陈旧锁：超 TTL，或超过一个节拍且 claim 之后账本零活动；否则退 20 不抢锁")
     a = ap.parse_args()
     if not getattr(a, "cmd", None):
         ap.print_help()

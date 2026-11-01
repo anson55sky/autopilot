@@ -1,5 +1,5 @@
 #!/bin/sh
-# H36 外部触发接续自测：A-tr-01..08。全程在 mktemp -d 的假工作区里跑，不建任何会话。
+# H36 外部触发接续自测：A-tr-01..12。全程在 mktemp -d 的假工作区里跑，不建任何会话。
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -146,6 +146,116 @@ if printf '%s' "$j" | "$PY" -c 'import json,sys; d=json.loads(sys.stdin.read().s
   pass 8 "--json 输出可被机器解析，字段里有 decision 与 reasons（宿主的 cron 任务能直接判）"
 else
   fail 8 "--json 不可解析：$j"
+fi
+
+# ---------------------------------------------------------------- 9-12 陈旧锁看门狗（release --if-stale）
+
+reset_round() {
+    put_goal on 12
+    put_state 1 build
+    put_tasks ready
+    put_inbox none
+    rm -f "$REPO/.autopilot/trigger.lock" "$REPO/.autopilot/ledger.jsonl"
+}
+age_lock() {  # $1=分钟：把锁的 claim 戳往前推，模拟会话跑了多久
+    L="$REPO/.autopilot/trigger.lock" MIN="$1" $PY - <<'PY'
+import json, os, time
+p = os.environ["L"]
+d = json.load(open(p, encoding="utf-8"))
+d["ts"] = time.time() - int(os.environ["MIN"]) * 60
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, sort_keys=True)
+PY
+}
+log_event() {  # 模拟 claim 之后会话真干了活留下的账本事件
+    NOW="$($PY -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))')" \
+    D="$REPO/.autopilot/ledger.jsonl" $PY - <<'PY'
+import os
+open(os.environ["D"], "a", encoding="utf-8").write(
+    '{"type":"worker","task":"T-01","ts":"%s"}\n' % os.environ["NOW"])
+PY
+}
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-quiet >/dev/null 2>&1
+age_lock 25
+out=$($PY "$TG" release --repo "$REPO" --if-stale 2>&1); rc=$?
+if [ "$rc" = 0 ] && ! [ -f "$REPO/.autopilot/trigger.lock" ] \
+   && grep -q '"type": "auto_round_released"' "$REPO/.autopilot/ledger.jsonl" \
+   && printf '%s' "$out" | grep -q "零活动"; then
+  pass 9 "claim 后超过一个节拍而账本零活动 → --if-stale 解锁并落一条 auto_round_released（占位就跑路的会话不再卡死整条链）"
+else
+  fail 9 "陈旧锁没被解开：rc=$rc $out"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-busy >/dev/null 2>&1
+log_event
+age_lock 25
+out=$($PY "$TG" release --repo "$REPO" --if-stale 2>&1); rc=$?
+if [ "$rc" = 20 ] && [ -f "$REPO/.autopilot/trigger.lock" ] && printf '%s' "$out" | grep -q "别抢正在干活的会话"; then
+  pass 10 "账本里有活动 = 会话还在跑，--if-stale 退 20 不抢锁（看门狗不能变成第二个开跑的人）"
+else
+  fail 10 "把还在干活的会话的锁抢了：rc=$rc $out"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-old >/dev/null 2>&1
+log_event
+age_lock 61
+out=$($PY "$TG" release --repo "$REPO" --if-stale 2>&1); rc=$?
+if [ "$rc" = 20 ] && [ -f "$REPO/.autopilot/trigger.lock" ] && printf '%s' "$out" | grep -q "宁停不抢"; then
+  pass 11 "超 TTL 但 claim 后有活动 → 仍不自动解锁：长轮次本来就可能跑很久，两个会话写同一轮的代价比链停下来等人高"
+else
+  fail 11 "有活动的锁被 TTL 抢了：rc=$rc $out"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-ttlidle >/dev/null 2>&1
+age_lock 61
+out=$($PY "$TG" release --repo "$REPO" --if-stale 2>&1); rc=$?
+if [ "$rc" = 0 ] && ! [ -f "$REPO/.autopilot/trigger.lock" ] && printf '%s' "$out" | grep -q "TTL"; then
+  pass 12 "超 TTL 且零活动 → TTL 路径解锁（既没在干活、又超时，没有任何理由继续等）"
+else
+  fail 12 "TTL 零活动路径没解锁：rc=$rc $out"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-d1 >/dev/null 2>&1
+age_lock 25
+out=$($PY "$TG" decide --repo "$REPO" 2>&1); rc=$?
+idle_ok=0
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "release --if-stale"; then idle_ok=1; fi
+$PY "$TG" claim --repo "$REPO" --session s-d2 >/dev/null 2>&1
+log_event
+age_lock 25
+out2=$($PY "$TG" decide --repo "$REPO" 2>&1); rc2=$?
+if [ "$idle_ok" = 1 ] && [ "$rc2" = 20 ] && ! printf '%s' "$out2" | grep -q "release --if-stale"; then
+  pass 13 "decide 两面：零活动的陈旧锁 → 判 GO 并给出解锁口径；有活动 → BUSY 且不引诱你去抢"
+else
+  fail 13 "decide 的看门狗口径不对：idle rc=$rc(ok=$idle_ok) busy rc=$rc2"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-c1 >/dev/null 2>&1
+log_event
+age_lock 61
+out=$($PY "$TG" claim --repo "$REPO" --session s-c2 2>&1); rc=$?
+busy_refused=0
+[ "$rc" = 20 ] && busy_refused=1
+if [ "$busy_refused" = 1 ]; then
+  pass 14 "claim 用的是同一个看门狗判据：锁超 TTL 但 claim 后有活动 → 退 20 不抢占（与 decide/release 三处一致，不存在第二个开跑的人）"
+else
+  fail 14 "claim 的看门狗口径不对：busy_refused=$busy_refused rc2=$rc2 out=$out2"
+fi
+
+reset_round
+$PY "$TG" claim --repo "$REPO" --session s-c6 >/dev/null 2>&1
+age_lock 61
+out3=$($PY "$TG" claim --repo "$REPO" --session s-c7 2>&1); rc3=$?
+if [ "$rc3" = 0 ] && printf '%s' "$out3" | grep -q "陈旧"; then
+  pass 15 "超 TTL 且零活动的锁允许直接改占（不必先跑一次 release），无人值守链条不会因此停摆"
+else
+  fail 15 "陈旧锁改占不通：rc=$rc3 $out3"
 fi
 
 if [ "$FAILED" -gt 0 ]; then
