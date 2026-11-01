@@ -877,6 +877,17 @@ case_coverage_gate() {
         fail 15 "分批冻结或记账不对（rc=$rc）：$out"
     fi
 
+    # 4b) 只在注释里"提到"某条目，不算有判定源（发射位点口径）
+    r4="$TMPROOT/h38mention"; mkdir -p "$r4/.autopilot/checks"
+    printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| A1 | x | y |\n| A9 | 只在注释里 | z |\n' > "$r4/.autopilot/GOAL.md"
+    printf '%s\n' '#!/bin/sh' '# 以后补 A9 的断言（注释里提到 A9）' 'NODE_IDS=(A1)' 'echo "RESULT A1 PASS ok"' > "$r4/.autopilot/checks/run.sh"
+    out=$($PY "$STATUS" coverage "$r4" 2>&1); rc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "缺判定源：A9"; then
+        pass 15 "注释里出现 A9 不算判定源：只认 RESULT 发射位点与引号里的 id"
+    else
+        fail 15 "宽松匹配把注释当判定源了（rc=$rc）：$out"
+    fi
+
     # 5) 老工作区（GOAL 没有矩阵行）行为不变
     r2="$TMPROOT/h38legacy"; mkdir -p "$r2/.autopilot/checks"
     printf '# GOAL\n\n终结目标：做 X\n' > "$r2/.autopilot/GOAL.md"

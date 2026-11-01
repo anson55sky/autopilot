@@ -152,6 +152,38 @@ if [ "$rc" -eq 2 ]; then ok 12 "freeze 拒绝 TODO-check（退出 2）"; else ba
 rc=0; sh "$CHECK" bogus "$REPO" >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 2 ]; then ok 13 "未知子命令退出 2"; else bad 13 "未知子命令退出 $rc（期望 2）"; fi
 
+# ---- H38：冻结前覆盖闸门（GOAL 矩阵 vs checks 判定源）
+write_runsh '#!/bin/sh
+NODE_IDS=(A1)
+echo "RESULT A1 PASS"
+echo "RESULT A2 PASS"
+exit 0
+'
+chmod +x "$CH/run.sh"
+printf '%s\n' '# GOAL' '' '## 验收矩阵' '' '| A# | 条目 | 判定 |' '| --- | --- | --- |' \
+  '| A1 | x | y |' '| A2 | x | y |' '| A3 | 还没有判定源 | z |' > "$AP/GOAL.md"
+
+# C14 有条目查无判定源 → freeze 退 24，且不写 MANIFEST
+rm -f "$CH/MANIFEST.sha256"
+rc=0; out=$(sh "$CHECK" freeze "$REPO" 2>&1) || rc=$?
+if [ "$rc" -eq 24 ] && ! [ -f "$CH/MANIFEST.sha256" ] && printf '%s' "$out" | grep -q "A3"; then
+  ok 14 "freeze 拒绝把「契约有、checks 里没有判定源」的条目冻进 MANIFEST（退 24 且零写盘）"
+else
+  bad 14 "覆盖闸门未生效：rc=$rc manifest=$([ -f "$CH/MANIFEST.sha256" ] && echo 有 || echo 无)"
+fi
+
+# C15 短理由不放行；带 AUTOPILOT_FREEZE_ALLOW_PARTIAL 的长理由才放行，并落账本
+rc=0; AUTOPILOT_FREEZE_ALLOW_PARTIAL="理由太短" sh "$CHECK" freeze "$REPO" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 24 ]; then ok 16 "分批冻结的短理由被拒（空话挡不住闸门）"; else bad 16 "短理由却放行：rc=$rc"; fi
+rc=0
+AUTOPILOT_FREEZE_ALLOW_PARTIAL="A3 需要手柄探针页，本轮先冻结已实现的工装范围，下一轮补" \
+  sh "$CHECK" freeze "$REPO" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$CH/MANIFEST.sha256" ] && grep -q '"coverage_partial"' "$AP/ledger.jsonl"; then
+  ok 15 "AUTOPILOT_FREEZE_ALLOW_PARTIAL 放行分批冻结：MANIFEST 落盘且理由进账本（可审计）"
+else
+  bad 15 "分批冻结路径不通：rc=$rc manifest=$([ -f "$CH/MANIFEST.sha256" ] && echo 有 || echo 无)"
+fi
+
 echo "SELFTEST: $PASS 通过 / $FAIL 失败"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

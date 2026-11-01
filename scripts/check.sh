@@ -91,9 +91,16 @@ case "$cmd" in
     # 装在 freeze 而不是收轮，是因为 ContraRunner 的缺陷正是"冻结时就只声明了 17/47 条"，
     # 事后拦（H37）只会把已经冻错的判定面一路带到报告里。
     if [ -f "$SCRIPT_DIR/status.py" ] && [ -f "$root/.autopilot/GOAL.md" ]; then
-      python3 "$SCRIPT_DIR/status.py" coverage "$root" || {
-        echo "冻结被拒：先补判定源或收窄契约（确需分批冻结：check.sh freeze 前用 status.py coverage --allow-partial "<理由>"）" >&2
-        exit 24; }
+      if [ -n "${AUTOPILOT_FREEZE_ALLOW_PARTIAL:-}" ]; then
+        python3 "$SCRIPT_DIR/status.py" coverage "$root" \
+          --allow-partial "$AUTOPILOT_FREEZE_ALLOW_PARTIAL" || { echo "冻结被拒：见上面的 COVERAGE 清单" >&2; exit 24; }
+      else
+        python3 "$SCRIPT_DIR/status.py" coverage "$root" || {
+          echo "冻结被拒：这些条目在 checks/ 里没有判定语句。先补判定源或收窄契约；" >&2
+          echo "确需分批冻结就带 ≥20 字理由重跑：" >&2
+          echo "  AUTOPILOT_FREEZE_ALLOW_PARTIAL=\'<理由>\' bash check.sh freeze <仓库目录>" >&2
+          exit 24; }
+      fi
     fi
     # 复用 environ.py 的 freeze（探测哈希实现，MANIFEST 字节格式与 0.8 一致）；
     # environ.py 不在时回退内建 shasum 管线（即 0.8 原样）。
