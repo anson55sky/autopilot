@@ -928,8 +928,11 @@ def unwired_pairs(ap):
         if (aid, key) in seen:
             continue
         seen.add((aid, key))
-        quoted = ['"%s"' % key, "'%s'" % key, "%s:" % key, '"%s":' % key]
-        if not any(q in text for text in pages for q in quoted):
+        # 键可能以任意形式出现在探针页源码里：引号字面量 "a34"、对象键 a34:、
+        # 或动态赋值 out.a34（JS 里常见）。用词边界匹配键标识符，而不是只认引号字面量，
+        # 否则"动态上报"的键会被误报成"没接"。
+        token = re.compile(r"\b%s\b" % re.escape(key))
+        if not any(token.search(text) for text in pages):
             out.append((aid, key))
     return out
 
