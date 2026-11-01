@@ -814,6 +814,27 @@ EOF
     else
         fail 14 "fail 轮次被误拦（rc=$rc）：$out"
     fi
+# ---------------------------------------------------------------- H41 未接键报告（派工前就知道现在拿不到 PASS）
+
+case_unwired_pairs() {
+    r="$TMPROOT/h41"; mkdir -p "$r/.autopilot/checks"
+    printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| --- | --- | --- |\n| A1 | x | y |\n| A2 | z | w |\n' > "$r/.autopilot/GOAL.md"
+    printf '#!/bin/sh\nUI_IDS=("A1:a1" "A2:a2")\necho "RESULT A1 PASS ok"\n' > "$r/.autopilot/checks/run.sh"
+    # 探针页里 a1 真上报（JS 对象字面量），a2 完全没写
+    printf '<html><body><script>document.body.dataset.probe = JSON.stringify({ a1: {ok: true} });</script></body></html>\n'         > "$r/.autopilot/checks/probe-x.html"
+    out=$($PY "$STATUS" coverage "$r" 2>&1)
+    if printf '%s' "$out" | grep -q "UNWIRED" && printf '%s' "$out" | grep -q "A2:a2"        && ! printf '%s' "$out" | grep -q "A1:a1"; then
+        pass 16 "映射里有、探针页真上报的键不报；只有没接的那条进 UNWIRED（不误报已接好的）"
+    else
+        fail 16 "未接键识别不对：$out"
+    fi
+    if printf '%s' "$out" | grep -q "本行只报告，不改判定"; then
+        pass 16 "UNWIRED 只报告不动判定（条目结果仍来自冻结 run.sh）"
+    else
+        fail 16 "口径声明没写进去：$out"
+    fi
+}
+
 # ---------------------------------------------------------------- H38 冻结前覆盖闸门
 
 mk_cov_repo() {  # $1=目录名 $2=契约条目串（空格分隔）$3=checks 里写到的条目 $4=数组里声明的条目
@@ -935,6 +956,7 @@ case_clock_accounting
 case_multibudget
 case_coverage_check
 case_coverage_gate
+case_unwired_pairs
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"

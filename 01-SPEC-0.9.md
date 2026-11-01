@@ -199,6 +199,7 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 | --- | --- | --- | --- |
 | H40 | `dag_scheduler.py start` 内置 `checks_edits()`：卡的写集里若有**盘上已存在**的 `.autopilot/checks/**` 文件 → 退 **24** 拒绝派发；checks/ 下尚不存在的新判定源（探针页）直接放行；改考卷须 `start --allow-checks-edit --note <理由>`（无 note 退 2），理由与文件清单写进 worker 账本事件的 `checks_edit` 字段 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；普通源码卡行为不变 | `dag-scheduler.selftest.sh` A-conc-14（8 项断言） |
 
+| H41 | `status.py coverage` 多一档 `UNWIRED`：拿 run.sh 已声明的 `A#:探针键` 映射表去 checks/ 的页面与产物里找那个键，找不到就点名「现在拿不到 PASS，缺的是尺子那一格」；只报告、不改判定、不动退出码（结果仍只认冻结 run.sh 的 RESULT 行） | 提示级（派工前给控制器看，不参与判定） | `status.selftest.sh` 例 16（2 项）+ ContraRunner 实测 14 条未接键 |
 ---
 
 ## 3. 新增：预算隔离

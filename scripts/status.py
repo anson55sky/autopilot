@@ -890,6 +890,50 @@ def judging_sources(ap):
 IDS_ARRAY_RE = re.compile(r"^\s*[A-Za-z_]*IDS\w*=\(([^)]*)\)", re.M)
 
 
+PAIR_MAP_RE = re.compile(r"""['"](A\d{1,3}):([A-Za-z][\w-]*)['"]""")
+
+
+def unwired_pairs(ap):
+    """H41：run.sh 的映射表里接了 `A#:探针键`，但没有任何探针页真会上报这个键。
+
+    为什么单独列一档：这九条（ContraRunner 的 A26-A28/A34-A35/A37-A39/A42）跑出来是
+    `FAIL 探针页未上报该条`，而 FAIL 里混着两种完全不同的原因——产品没做 vs 尺子没接。
+    派工前就能机检出来的事，不该等工人跑 15 分钟回来才发现"这张卡结构上做不绿"。
+
+    只报告，不改判定：这些条目仍由冻结 run.sh 的 RESULT 行说话（永久红线 3）。
+    """
+    cdir = os.path.join(os.path.abspath(ap), "checks")
+    run_sh = os.path.join(cdir, "run.sh")
+    try:
+        with open(run_sh, encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+    except OSError:
+        return []
+    pages = []
+    try:
+        names = sorted(os.listdir(cdir))
+    except OSError:
+        names = []
+    for fn in names:
+        if not fn.endswith(".html"):
+            continue
+        try:
+            with open(os.path.join(cdir, fn), encoding="utf-8", errors="replace") as fh:
+                pages.append(fh.read())
+        except OSError:
+            continue
+    out = []
+    seen = set()
+    for aid, key in PAIR_MAP_RE.findall(body):
+        if (aid, key) in seen:
+            continue
+        seen.add((aid, key))
+        quoted = ['"%s"' % key, "'%s'" % key, "%s:" % key, '"%s":' % key]
+        if not any(q in text for text in pages for q in quoted):
+            out.append((aid, key))
+    return out
+
+
 def declared_ids(ap):
     """run.sh 里 `*_IDS=(...)` 声明的编号——只有进了数组才享有三条兜底
     （缺 node / 缺浏览器 / 探针未就绪 → 组内每条打 FAIL，而不是静默缺席）。"""
@@ -954,6 +998,12 @@ def cmd_coverage(root, allow_partial=""):
         print("  WEAK：%s%s —— 有判定语句但没进 run.sh 的 *_IDS 数组，"
               "缺少 node/浏览器/探针未就绪三条兜底，异常退出时会静默缺席而不是变红"
               % (" ".join(weak[:12]), " …" if len(weak) > 12 else ""))
+    unwired = [(a, k) for (a, k) in unwired_pairs(ap) if a in set(ids)]
+    if unwired:
+        print("  UNWIRED（映射接了但判定面里查不到这个键，现在拿不到 PASS）：%s"
+              % " ".join("%s:%s" % (a, k) for a, k in unwired[:16]))
+        print("    —— 缺的是尺子那一格（产品没做是另一种红），补键的卡要走 --allow-checks-edit（H40）；"
+              "本行只报告，不改判定，条目结果仍由冻结 run.sh 的 RESULT 行说话")
     if not missing:
         print("COVERAGE 0 全部验收项在冻结面里都有判定源（H38 通过%s）"
               % ("；WEAK 条目请自行判断是否纳入数组" if weak else ""))

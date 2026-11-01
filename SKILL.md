@@ -177,6 +177,12 @@ while 未触发停止条件:
 写进 worker 账本事件，供事后审计。这条闸门存在的原因是铁律「不改 checks/」过去只写在文档里，
 没有任何机制能分辨一张卡的写集是不是判定文件——靠控制器脑子里的区分，换个执行者就会抄错。
 
+**派工前再看一眼 UNWIRED（H41）**：`status.py coverage` 除了 H38 的缺判定源，还会列出
+「run.sh 的映射表接了 `A#:探针键`，但 checks/ 里查不到那个键」的条目——这些验收项**现在拿不到 PASS**，
+红因是尺子缺一格而不是产品没做。把卡派给源码文件之前先按这张表对齐：
+判据读的是哪个文件的字段，卡就得写那个文件（T-18 派给 render.js 做 A24/A25 就是这么废的，
+15 分钟 + 680 万 token 换一句派工前可机检的话）。该行只报告，不改判定、不改退出码。
+
 ```sh
 python3 $SKILL/scripts/dag_scheduler.py config  --repo $REPO --enabled
 python3 $SKILL/scripts/dag_scheduler.py config  --repo $REPO --json
