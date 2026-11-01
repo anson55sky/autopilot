@@ -50,7 +50,7 @@ new_repo() {
         > "$_d_repo/.autopilot/ledger.jsonl"
     printf '%s' '{"round":1,"verdict":"fail","passed":["A1"],"failed":[],"skipped":["A2"],"notes":"一轮收完"}' \
         > "$_d_repo/.autopilot/rounds/r-01.json"
-    printf '%s' '{"round":1,"calls_used":7,"elapsed_minutes":120}' > "$_d_repo/.autopilot/rounds/r-01.metrics.json"
+    printf '%s' '{"round":1,"calls_used":7,"elapsed_minutes":120,"coverage":{"contract_items":5,"with_source":3,"ratio":0.6,"protected_by_arrays":2,"weak_not_in_arrays":["A4"],"no_source":["A5","A6"]}}' > "$_d_repo/.autopilot/rounds/r-01.metrics.json"
     printf '%s\n' "$_d_repo"
 }
 
@@ -85,6 +85,13 @@ if grep -q "7 / 80" "$page" && grep -q "120 / 600 分" "$page"; then
 else
   fail 4 "预算数字没出现：$(grep -o "[0-9]* / 80\|[0-9]* / 600 分" "$page" | tr '\n' ' ')"
 fi
+# H19 × H38：覆盖率卡片必须用契约条目数当分母，并把缺口与 WEAK 一起显示
+if grep -q "判定覆盖率" "$page" && grep -q "3/5（缺 2 · 未受兜底 1）" "$page"; then
+  pass 6 "看板有判定覆盖率卡片：3/5 + 缺 2 + 未受兜底 1，分母来自契约而不是跑出的结果数"
+else
+  fail 6 "覆盖率卡片没渲染或分母用错：$(grep -o "判定覆盖率[^<]*<b>[^<]*" "$page" | head -2)"
+fi
+
 after=$(hash_tree "$repo/.autopilot" "dashboard")
 if [ "$before" = "$after" ]; then
   pass 5 "只读：除 dashboard/ 外，.autopilot 一字未动"
@@ -96,8 +103,9 @@ fi
 
 $PY "$DASH" check --repo "$repo" > "$TMPROOT/check.out" 2>&1
 rc=$?
-if [ "$rc" = "0" ] && grep -q "验收 PASS 1 / FAIL 0 / SKIP 1" "$TMPROOT/check.out"; then
-  pass 3 "check 子命令给出单行摘要（监督者快速看）"
+if [ "$rc" = "0" ] && grep -q "验收 PASS 1 / FAIL 0 / SKIP 1" "$TMPROOT/check.out" \
+   && grep -q "判定覆盖率 3/5（缺 2 · 未受兜底 1）" "$TMPROOT/check.out"; then
+  pass 3 "check 单行摘要里也带判定覆盖率（监督者不用开页面就能看到分母）"
 else
   fail 3 "check 输出不对：$(cat "$TMPROOT/check.out")"
 fi
@@ -105,8 +113,9 @@ fi
 empty="$TMPROOT/db-empty"
 mkdir -p "$empty/.autopilot"
 out2=$($PY "$DASH" render --repo "$empty" 2>&1); rc2=$?
-if [ "$rc2" = "0" ] && grep -q "tasks.json 为空" "$empty/.autopilot/dashboard/index.html"; then
-  pass 4 "空工作区照样出页并如实标空，不编数据"
+if [ "$rc2" = "0" ] && grep -q "tasks.json 为空" "$empty/.autopilot/dashboard/index.html" \
+   && grep -q "—（未收轮或 GOAL 无矩阵行）" "$empty/.autopilot/dashboard/index.html"; then
+  pass 4 "空工作区照样出页并如实标空，覆盖率卡片写占位而不编数"
 else
   fail 4 "空工作区处理不对（rc=$rc2）：$out2"
 fi

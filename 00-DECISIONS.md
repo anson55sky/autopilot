@@ -468,6 +468,14 @@
   没有 GOAL 矩阵行（老工作区、刚 init）时闸门完全不介入，行为与旧版一致。
   证据：`scripts/status.selftest.sh` 例 14（5 项断言：拒收 + 零写盘、SKIP 放行、无矩阵不介入、
   report 闸门、fail 不介入）+ `status.py` 的 `COVERAGE CHECK` 与 `latest_round_doc()` 退 24
+- **H15 × H19 看板补判定覆盖率卡片（0.9.7）。** 覆盖率从前只出现在 `metrics.py summary` 的文字行里，
+  看板却只展示 PASS/FAIL/SKIP 计数——而 SKIP 与"根本没判定源"在看板上长得一样，正是那次
+  "17/17 全绿"事故的视觉版本。现在：收轮时 `r-XX.metrics.json` 直接带 `coverage` 字段，
+  看板卡片与 `dashboard.py check` 单行摘要都读它，**分母固定是契约条目数**，并列出缺几条、
+  几条没进兜底数组。算式收敛为 `status.coverage_numbers()` 一处实现（闸门 / 指标 / 看板共用），
+  `metrics.coverage_block` 改为委托。没有收轮指标时卡片写占位，不猜数。
+  证据：`scripts/dashboard.selftest.sh` 11 项（含覆盖率卡片两条：有数据显示 3/5+缺 2+未受兜底 1、
+  空工作区写占位）
 - **H38 冻结前覆盖闸门（已实现，H37 的前移）。** H37 装在收轮处，位置本身就晚了：ContraRunner 的
   根因是**冻结时 `run.sh` 只声明了 17 条 id，而契约写了 47 条**，缺陷照样被冻进 MANIFEST 一路带到报告。
   新增 `status.py coverage --repo`，并接进 `check.sh freeze`（在写 MANIFEST 之前）：

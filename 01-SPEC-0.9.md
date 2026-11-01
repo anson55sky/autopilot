@@ -151,7 +151,7 @@ flex 卡一律 `FLEX-SERIAL`，照旧走串行（G4）。`tasks.json` 是唯一�
 
 | 项 | 机制 | 强制层级 | 证据 |
 | --- | --- | --- | --- |
-| H15 | `tools/dashboard.py render/check`：单文件静态看板（内联 CSS/JS、零外部引用、路径脱敏、只读 `.autopilot/`） | 只读；不构成验收证据 | `dashboard.selftest.sh` 10 项（A-db-01…05） |
+| H15 | `tools/dashboard.py render/check`：单文件静态看板（内联 CSS/JS、零外部引用、路径脱敏、只读 `.autopilot/`）；0.9.7 起加**判定覆盖率卡片**（分母=契约条目，缺口与未受兜底一起显示；没有收轮指标就写占位不猜数），`check` 单行摘要同样带覆盖率 | 只读；不构成验收证据 | `dashboard.selftest.sh` 11 项（A-db-01…05，含覆盖率两条） |
 | H16 | `scripts/triage.py`：四类根因（env/unimpl/code/acceptance）+ 前提置疑点名；`export.py pack/verify`：证据包 + sha256 清单 + 事后篡改可查 | 脚本级只作建议；**不改判定、不改 checks/** | `triage.selftest.sh` 9 项、`export.selftest.sh` 15 项 |
 | H32 | `export.py pr`：PR-ready 描述（判定来源、盲区、diff、SKIP 单列、"不执行 push"声明） | 脚本级；无 git 写操作 | `export.selftest.sh` A-ex-05 |
 | H34 | `export.py otel`：账本 → OTLP 风格 span JSON，属性脱敏，**只落文件不发网络** | 脚本级、默认不启用（显式调用才出） | `export.selftest.sh` A-ex-06 |
@@ -169,7 +169,7 @@ flex 卡一律 `FLEX-SERIAL`，照旧走串行（G4）。`tasks.json` 是唯一�
 | H21 | `scripts/symbols.py scan/find/brief`：各语言定义式正则 → `.autopilot/symbols.json`（全排序、无时间戳、可复现）；`resume.py` **仅在快照存在时**多打一行「符号:」；上限（文件数/定义数/单文件大小与条数）触顶即置 `truncated` 并在摘要里明写 | 脚本级只读；零 DB、零第三方、无常驻（全局约束 4） | `symbols.selftest.sh` A-sy-01…07（9 项，含关闭态逐字节等价） |
 | H13/H27 | GOAL 可选段 `## SANDBOX`（缺省关：子命令退 23、不落文件）+ `scripts/sandbox.py probe/plan/check-read/check-write`：隔离能力探测（`container`/`native`/`none`，探不到打印 DEGRADE 并按 B3 判 SKIP）、凭据与私密路径**读拒绝**（路径归一后判定，含 `../` 穿越）、角色分档读写矩阵；**只渲染容器命令模板，不执行** | 脚本级判定；容器强制力属宿主/OS，探不到就如实降级 | `sandbox.selftest.sh` A-sb-01…08（10 项） |
 | H3 二期 | `inbox.py verify --receipts <宿主回执.json> [--strict]`：声称的批准逐条对账——回执无此 ref → `GHOST-REF`(24)、回执与声称相反 → `MISMATCH`(24)、无 ref/legacy → `NOT-VERIFIED`(30)、回执文件坏 → 2 不假装核对过；不联网、不调宿主 API | 脚本级对账；回执由执行器导出 | `inbox.selftest.sh` IB23…IB26（共 26 例） |
-| H19 | `scripts/metrics.py verdicts/cost/summary`：同 `manifest` 戳内的判定漂移率、一次通过率（并声明 `pass^k` 需 k 次独立采样、本域给不出）、只认 `source=host` 的 USD/卡与 USD/通过项、playbook 近重率代理；数据不足一律 `INSUFFICIENT`/`NA` | 脚本级只读统计；**样本不足不编数** | `metrics.selftest.sh` A-mt-01…07（8 项） |
+| H19 | 算式收敛到 `status.coverage_numbers()`（H38 闸门、收轮指标 `r-XX.metrics.json` 的 `coverage` 字段、看板卡片三处共用一份），`metrics.py` 只委托不算第二遍。`scripts/metrics.py verdicts/cost/summary`：同 `manifest` 戳内的判定漂移率、一次通过率（并声明 `pass^k` 需 k 次独立采样、本域给不出）、只认 `source=host` 的 USD/卡与 USD/通过项、playbook 近重率代理；数据不足一律 `INSUFFICIENT`/`NA` | 脚本级只读统计；**样本不足不编数** | `metrics.selftest.sh` A-mt-01…07（8 项） |
 | H35 | `FLEX_RULES.branch_max`（缺省 0=关，子命令退 23）+ `scripts/flexbranch.py add/list/pick/audit`：分支产物只能在 `sandbox/`（越界退 22）、超数与重名退 24、只有 Verifier 能定选择（退 31）、理由 ≥20 字；结论只落成 `sandbox/proposals/BRANCH_PICK-*.md` 提案 + 账本事件 | 脚本级拦落点与角色；**判定面零写入**（`tasks.json`/`r-XX.json` 指纹不变） | `flexbranch.selftest.sh` A-fb-01…07（9 项） |
 | H37 | 判定覆盖闸门：`close-round` 在 `verdict=pass` 且 GOAL 矩阵有条目在 passed/failed/skipped 三处都没出现时退 **24 且零写盘**；`phase report` 按轮号最大的 `r-<n>.json`（派生 metrics/flex 文档不算）同样拦。SKIP 算判定；`verdict=fail` 不拦；无矩阵行时完全不介入 | 脚本级（新写盘前置检查） | `status.selftest.sh` 例 14（5 项断言） |
 

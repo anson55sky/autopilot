@@ -245,27 +245,15 @@ def cmd_cost(a):
 
 
 def coverage_block(repo):
-    """判定覆盖率：契约条目里有多少真的能在冻结面里找到判定源（H38 同源口径，不另算一套）。
+    """判定覆盖率：契约条目里有多少真的能在冻结面里找到判定源。
 
     为什么放进度量里：ContraRunner 报告写"17/17 全绿"时，契约其实是 47 条——
     分母用错，进度就好看了一倍。覆盖率必须和漂移率、成本并列，而不是等人去翻 run.sh。
+    算式不在这里：`status.coverage_numbers` 是唯一实现，闸门、收轮指标与看板共用它。
     """
-    ap = os.path.join(os.path.abspath(repo), ".autopilot")
-    if status_mod is None:
+    if status_mod is None or not hasattr(status_mod, "coverage_numbers"):
         return {"note": "status.py 不可用，覆盖率不单独计量"}
-    ids = status_mod.acceptance_ids(ap)
-    if not ids:
-        return {"contract_items": 0, "note": "GOAL 无矩阵行"}
-    sources, _ = status_mod.judging_sources(ap)
-    declared = status_mod.declared_ids(ap)
-    covered = [i for i in ids if i in sources]
-    missing = [i for i in ids if i not in sources]
-    weak = sorted(set(covered) - declared, key=lambda x: int(x[1:]))
-    return {"contract_items": len(ids), "with_source": len(covered),
-            "ratio": round(float(len(covered)) / len(ids), 4),
-            "protected_by_arrays": len(set(covered) & declared),
-            "weak_not_in_arrays": weak, "no_source": missing}
-
+    return status_mod.coverage_numbers(os.path.join(os.path.abspath(repo), ".autopilot"))
 
 def cmd_summary(a):
     repo = os.path.abspath(a.repo)

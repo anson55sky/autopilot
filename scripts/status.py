@@ -905,6 +905,28 @@ def declared_ids(ap):
     return out
 
 
+def coverage_numbers(ap):
+    """判定覆盖率的唯一算式：契约条目 / 有判定源 / 受数组保护 / WEAK / 无源。
+
+    H38 的 `coverage` 子命令、H19 的 `metrics` 与看板的覆盖率卡片都读它——
+    三处各算一遍迟早会给出三个分母，而分母用错正是"17/17 全绿"那种事故的来源。
+    """
+    ids = acceptance_ids(ap)
+    if not ids:
+        return {"contract_items": 0, "with_source": 0, "ratio": None,
+                "protected_by_arrays": 0, "weak_not_in_arrays": [], "no_source": [],
+                "note": "GOAL 无矩阵行"}
+    sources, _ = judging_sources(ap)
+    declared = declared_ids(ap)
+    covered = [i for i in ids if i in sources]
+    missing = [i for i in ids if i not in sources]
+    weak = sorted(set(covered) - declared, key=lambda x: int(x[1:]))
+    return {"contract_items": len(ids), "with_source": len(covered),
+            "ratio": round(float(len(covered)) / len(ids), 4),
+            "protected_by_arrays": len(set(covered) & declared),
+            "weak_not_in_arrays": weak, "no_source": missing}
+
+
 def cmd_coverage(root, allow_partial=""):
     """H38 冻结前的覆盖闸门：GOAL 矩阵里的每条 A# 都得在 checks/ 里找得到判定源。
 
@@ -1144,6 +1166,8 @@ def cmd_close_round(root, round_path):
 
     metrics = {
         "round": round_no,
+        # H19 × H38 同源：收轮就把判定覆盖率一起落盘，看板与指标读同一份数，不再各算一遍
+        "coverage": coverage_numbers(ap),
         "calls_used": calls,
         # H8：工具调用数本地可数；成本只认宿主上报（source == "host"）
         "tool_calls_used": sum(1 for e in events if e.get("type") == "tool"),

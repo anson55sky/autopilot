@@ -85,6 +85,21 @@ def load_state(repo):
             "epoch": tasks_doc.get("epoch") if isinstance(tasks_doc, dict) else None}
 
 
+def cover_line(cov):
+    """判定覆盖率文案。分母是**契约条目数**而不是"跑出结果的条数"——
+    用错分母就是 ContraRunner 那次「17/17 全绿」而契约其实 47 条的事故。
+    没有收轮指标时写占位，绝不猜数。"""
+    cov = cov or {}
+    items = int(cov.get("contract_items") or 0)
+    if not items:
+        return "—（未收轮或 GOAL 无矩阵行）"
+    gaps, weak = len(cov.get("no_source") or []), len(cov.get("weak_not_in_arrays") or [])
+    txt = "%d/%d" % (int(cov.get("with_source") or 0), items)
+    if gaps or weak:
+        txt += "（缺 %d · 未受兜底 %d）" % (gaps, weak)
+    return txt
+
+
 def badge(kind, label=None):
     color = COLOR.get(kind, "#5b6470")
     return ('<span class="b" style="background:%s">%s</span>'
@@ -140,6 +155,9 @@ def render_html(repo, data, rounds_show=8):
     met = data.get("metrics") or {}
     wall = "%s / %s 分" % (met.get("elapsed_minutes", "-"), budget.get("max_minutes", "-"))
     calls_line = "%s / %s" % (met.get("calls_used", "-"), budget.get("max_calls", "-"))
+    # H19 × H38：判定覆盖率。分母是**契约条目数**而不是"跑出结果的条数"——
+    # 用错分母就是 ContraRunner 那次"17/17 全绿"而契约其实 47 条的事故。没有就占位，不猜数。
+    cover = cover_line(met.get("coverage"))
     page = HTML_TMPL
     for token, value in (
             ("@@TITLE@@", esc(state.get("goal", ""), repo)[:60]),
@@ -150,6 +168,7 @@ def render_html(repo, data, rounds_show=8):
             ("@@PASS@@", "%d / %d" % (len(passed), len(passed) + len(failed) + len(skipped))),
             ("@@FAIL@@", str(len(failed))),
             ("@@SKIP@@", str(len(skipped))),
+            ("@@COVER@@", cover),
             ("@@TASKS@@", "%d / %d" % (len(done), len(tasks))),
             ("@@WALL@@", wall),
             ("@@CALLS@@", calls_line),
@@ -198,6 +217,7 @@ HTML_TMPL = """<!doctype html>
     <div class="card">验收 PASS<b style="color:#197d3a">@@PASS@@</b></div>
     <div class="card">FAIL<b style="color:#b3261e">@@FAIL@@</b></div>
     <div class="card">SKIP（未判定）<b style="color:#8a6d00">@@SKIP@@</b></div>
+    <div class="card">判定覆盖率<b>@@COVER@@</b></div>
     <div class="card">任务关闭<b>@@TASKS@@</b></div>
     <div class="card">墙钟 / 预算<b>@@WALL@@</b></div>
     <div class="card">调用 / 预算<b>@@CALLS@@</b></div>
@@ -251,11 +271,12 @@ def cmd_check(args):
     repo = os.path.abspath(args.repo)
     data = load_state(repo)
     result = data["result"]
-    print("DASHBOARD 0 phase=%s epoch=%s 任务 %d（done %d） · 验收 PASS %d / FAIL %d / SKIP %d · 轮次 %d · 账本 %d"
+    print("DASHBOARD 0 phase=%s epoch=%s 任务 %d（done %d） · 验收 PASS %d / FAIL %d / SKIP %d · 轮次 %d · 账本 %d · 判定覆盖率 %s"
           % (data["state"].get("phase"), data.get("epoch"), len(data["tasks"]),
              len([t for t in data["tasks"] if t.get("status") == "done"]),
              len(result.get("passed") or []), len(result.get("failed") or []),
-             len(result.get("skipped") or []), len(data["rounds"]), len(data["ledger"])))
+             len(result.get("skipped") or []), len(data["rounds"]), len(data["ledger"]),
+             cover_line((data.get("metrics") or {}).get("coverage"))))
     return E_OK
 
 
