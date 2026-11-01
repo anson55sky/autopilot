@@ -325,6 +325,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 还原/回滚不落账（H11） | 事后无法区分"没动过"与"动过又还原"，冻结面漂移无从举证 | 当场 `status.py log` 一条 `type=revert`，带文件路径与还原前后 sha256 |
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
+| 未覆盖的验收项当已完成（H37） | 冻结通道少列一个 id 就永远不会红——假绿里最隐蔽的一种 | `close-round`/`phase report` 会拒（退 24）：补 RESULT 判定、给 SKIP 理由，或按事实改 verdict；给 checks 加 id 属契约动作，走提案 + 重冻 |
 | 多分支对比的胜出方案直接当验收通过（H35） | 探索产物污染判定，等价于自评自验 | `flexbranch.py pick` 只写 `sandbox/proposals/BRANCH_PICK-*.md`，须 merge 批准 + epoch+1 才生效；只有 Verifier 能定选择（退 31 剥夺） |
 | 并发版把 flex 卡也塞进调度器 | 探索分支绕过闸门与串行预算 | 第一版只调度 strict；flex 显示 `FLEX-SERIAL`，照串行 |
 | 验证者没声明权限档位就写 `r-XX.json`（H31） | 判定来源不明，"谁写谁不验"退化成一句口号 | `verifier.py declare` → `check` 退 0 才写结论；宿主无 `session_mode` 原语时如实写 DEGRADED 降级声明 |

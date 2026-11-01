@@ -744,6 +744,77 @@ PY
     rc_expect 13 2 "$?" "未知预算维度退 2"
 }
 
+# ---------------------------------------------------------------- H37 判定覆盖检查
+
+case_coverage_check() {
+    # 1) 矩阵 3 条、本轮只判了 2 条 → verdict=pass 必须被拒，且零写盘
+    repo=$(new_repo h37a)
+    mkdir -p "$repo/.autopilot/rounds"
+    write_state "$repo/.autopilot/state.json" "\"$(now_minus_aware 30)\""
+    printf '%s\n' '# GOAL' '' '## 验收矩阵' '' '| A# | 条目 | 判定 |' '| --- | --- | --- |' \
+      '| A1 | x | y |' '| A2 | x | y |' '| A3 | x | y |' > "$repo/.autopilot/GOAL.md"
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": ["A2"], "skipped": [], "tasks_closed": 0, "notes": "A3 从没跑出 RESULT"}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-01.json" 2>&1); rc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "COVERAGE CHECK 拒绝收轮" \
+       && printf '%s' "$out" | grep -q "A3" && ! [ -f "$repo/.autopilot/rounds/r-01.metrics.json" ] \
+       && ! grep -q '"rounds_used": 1' "$repo/.autopilot/state.json"; then
+        pass 14 "未覆盖验收项存在时拒绝收轮并点名（零写盘，不留半个轮次）"
+    else
+        fail 14 "覆盖检查没拦住（rc=$rc）：$out"
+    fi
+
+    # 2) 给 A3 一个 SKIP 判定 → 放行：SKIP 也是判定，不算覆盖缺失
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": ["A2"], "skipped": ["A3"], "tasks_closed": 0, "notes": "A3 缺环境，按 SKIP 声明"}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-01.json" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "COVERAGE CHECK 通过"; then
+        pass 14 "三条都有结论时放行（SKIP 算判定；全绿另说，SKIP 不进 passed）"
+    else
+        fail 14 "SKIP 被误判成未覆盖（rc=$rc）：$out"
+    fi
+
+    # 3) 没有 GOAL 矩阵的工作区行为不变（老工作区与刚 init 的不能被新闸门误伤）
+    repo2=$(new_repo h37b)
+    mkdir -p "$repo2/.autopilot/rounds"
+    write_state "$repo2/.autopilot/state.json" "\"$(now_minus_aware 20)\""
+    cat > "$repo2/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0, "notes": "无矩阵"}
+EOF
+    out=$($PY "$STATUS" close-round "$repo2" "$repo2/.autopilot/rounds/r-01.json" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "COVERAGE CHECK"; then
+        pass 14 "矩阵为空时闸门完全不介入（与旧版行为逐字节一致）"
+    else
+        fail 14 "无矩阵却被拦（rc=$rc）：$out"
+    fi
+
+    # 4) 手工把阶段推到 report 同样要过覆盖检查，且不许改写 state
+    printf '%s\n' '# GOAL' '' '## 验收矩阵' '' '| A1 | x | y |' '| A2 | x | y |' \
+      '| A9 | 从没判过 | z |' > "$repo/.autopilot/GOAL.md"
+    out=$($PY "$STATUS" phase "$repo" report 2>&1); rc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "拒绝进入 report" \
+       && printf '%s' "$out" | grep -q "A9" \
+       && ! grep -q '"phase": "report"' "$repo/.autopilot/state.json"; then
+        pass 14 "手工 status.py phase report 也拦：未覆盖 ≠ 已完成，state.json 未被改写"
+    else
+        fail 14 "report 闸门没生效（rc=$rc）：$out"
+    fi
+
+    # 5) verdict=fail 时不拦：如实报未完成是合法动作，闸门只管"声称通过"
+    printf '%s\n' '# GOAL' '' '## 验收矩阵' '' '| A1 | x | y |' '| A9 | 从没判过 | z |' \
+      > "$repo/.autopilot/GOAL.md"
+    cat > "$repo/.autopilot/rounds/r-02.json" <<'EOF'
+{"round": 2, "verdict": "fail", "passed": ["A1"], "failed": ["A2"], "skipped": [], "tasks_closed": 0, "notes": "如实报未完成"}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-02.json" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass 14 "verdict=fail 时覆盖闸门不介入（只拦「声称通过」，不拦「如实报未完成」）"
+    else
+        fail 14 "fail 轮次被误拦（rc=$rc）：$out"
+    fi
+}
 case_naive
 case_garbage
 case_empty
@@ -758,6 +829,7 @@ case_corrupt_files
 case_close_check
 case_clock_accounting
 case_multibudget
+case_coverage_check
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"

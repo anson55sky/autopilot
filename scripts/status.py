@@ -25,6 +25,7 @@ CLI 与 0.8 完全兼容（同样的子命令、同样的参数名），0.9 是�
 
 import argparse
 import datetime
+import glob
 import json
 import os
 import re
@@ -459,6 +460,27 @@ def rounds_dir(ap):
     return os.path.join(ap, "rounds")
 
 
+def latest_round_doc(ap):
+    """真·轮次判定文档：只认 `r-<n>.json`。
+
+    `r-<n>.metrics.json` / `r-<n>.flex.json` 是派生产物，按文件名字典序排它们会压过判定文档
+    （实测把 report 闸门判空放行），所以按轮号取最大值而不是按文件名排序。
+    """
+    best = None
+    try:
+        names = os.listdir(rounds_dir(ap))
+    except OSError:
+        return None
+    for name in names:
+        m = re.match(r"^r-(\d+)\.json$", name)
+        if not m:
+            continue
+        no = int(m.group(1))
+        if best is None or no > best[0]:
+            best = (no, os.path.join(rounds_dir(ap), name))
+    return best[1] if best else None
+
+
 def round_record_path(ap, round_no):
     return os.path.join(rounds_dir(ap), "r-%02d.json" % round_no)
 
@@ -838,6 +860,27 @@ def cmd_phase(root, phase):
     if phase not in PHASES:
         print("阶段只能是: %s" % " / ".join(PHASES))
         return 2
+    # H37：手工把阶段推到 report（= 声称这一轮次序列做完了）时，同样要过覆盖检查。
+    # 没有轮次文档时不设闸——老工作区与刚 init 的工作区行为不变。
+    if phase == "report":
+        ids = acceptance_ids(ap)
+        latest_path = latest_round_doc(ap)
+        if ids and latest_path:
+            latest = load_json(latest_path)
+            if isinstance(latest, dict) and str(latest.get("verdict") or "").lower() == "pass":
+                covered = set()
+                for key in ("passed", "failed", "skipped"):
+                    val = latest.get(key)
+                    if isinstance(val, list):
+                        covered.update(str(x).strip() for x in val)
+                missing = [i for i in ids if i not in covered]
+                if missing:
+                    print("COVERAGE CHECK 拒绝进入 report: 最新一轮（%s）声称 pass，"
+                          "但 GOAL 矩阵有 %d 条从未跑出判定：%s"
+                          % (os.path.basename(latest_path), len(missing), " ".join(missing[:12])))
+                    print("未覆盖 ≠ 已完成。先让冻结通道覆盖它们（改 checks/ 走提案 + 重冻），"
+                          "或按事实把 verdict 改成 fail / 给它们 SKIP 理由")
+                    return 24
     state["phase"] = phase
     dump_json(path, state)
     print("阶段: %s" % phase)
@@ -1104,6 +1147,27 @@ def cmd_close_round(root, round_path):
             return 24
         else:
             print("CLOSE CHECK 通过：本轮关闭 %d 个任务，与 tasks.json 记账一致" % actual_closed)
+
+    # ---- 判定覆盖检查（H37）：声称 pass 却有验收项一条 RESULT 都没跑出来 → 拒绝收轮（零写盘）。
+    # 立规理由：ContraRunner r-05 实测——`run.sh` 的 id 数组只列了 A1–A17，GOAL 矩阵有 47 条。
+    # 数组外的条目即使永远没有 RESULT 行，也不会让任何检查变红，"未覆盖"就静默变成了"已完成"。
+    if str(round_doc.get("verdict") or "").strip().lower() == "pass":
+        ids = acceptance_ids(ap)
+        if ids:
+            covered = set()
+            for key in ("passed", "failed", "skipped"):
+                val = round_doc.get(key)
+                if isinstance(val, list):
+                    covered.update(str(x).strip() for x in val)
+            missing = [i for i in ids if i not in covered]
+            if missing:
+                print("COVERAGE CHECK 拒绝收轮: verdict=pass 但 GOAL 矩阵里 %d 条验收项"
+                      "本轮没有任何 RESULT 判定（PASS/FAIL/SKIP 都算判定）：%s"
+                      % (len(missing), " ".join(missing[:12])))
+                print("要么这些条目还没进冻结通道（先跑 check.sh freeze 并确认 run.sh 的 id 数组覆盖到它们，"
+                      "改 checks/ 属契约动作，走提案 + 重冻），要么按事实把 verdict 改成 fail / 给它们 SKIP 理由")
+                return 24
+            print("COVERAGE CHECK 通过：GOAL 的 %d 条验收项本轮都有判定" % len(ids))
 
     # ---- 写轮次记录 + 指标
     if round_no:

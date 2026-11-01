@@ -444,6 +444,18 @@
   "REPORT 必须写明启用了外部触发"的声明字段。**建会话与发消息一律由宿主做**（铁律 5），
   本模块不碰任何宿主 API。与 H9 的墙钟口径配套：休眠段不计活动，但预算判定仍按墙钟。
   证据：`scripts/trigger.selftest.sh` A-tr-01…08（9 项，含关闭态、锁、上限、待批优先、阶段停止）
+- **H37 未覆盖验收项不得声称完成（已实现，由试点仓实测缺陷倒逼）。** ContraRunner r-05 的真实问题：
+  `checks/run.sh` 的 id 数组只列了 `A1–A12/A13–A17`，而 GOAL 矩阵有 **47 条**；数组外的条目即使
+  **一条 RESULT 都没跑出来**，也不会让任何检查变红——`resume.py` 只是打印"未覆盖"，没有任何闸门拦它。
+  这就是"未覆盖被静默当成已完成"，是全组最 nasty 的一种假绿。落地两道闸：
+  ① `status.py close-round`：`verdict=pass` 且 GOAL 矩阵里有 A# 在 passed/failed/skipped 三处都没出现
+  → 打 `COVERAGE CHECK 拒绝收轮` 并点名条目，**退 24 且零写盘**（不留下半个轮次的 metrics）；
+  ② `status.py phase report`：手工把阶段推到 report 时按 `r-<n>.json` 里**轮号最大**的那份判定同样拦
+  （派生的 `r-<n>.metrics.json` 不算判定文档——按文件名字典序取末位会被它压住而漏判，已修）。
+  口径：`SKIP` 算判定（缺环境要写明理由），`verdict=fail` 不受闸——**只拦"声称通过"，不拦"如实报未完成"**。
+  没有 GOAL 矩阵行（老工作区、刚 init）时闸门完全不介入，行为与旧版一致。
+  证据：`scripts/status.selftest.sh` 例 14（5 项断言：拒收 + 零写盘、SKIP 放行、无矩阵不介入、
+  report 闸门、fail 不介入）+ `status.py` 的 `COVERAGE CHECK` 与 `latest_round_doc()` 退 24
 
 #### H 组落地顺序（裁决后的排期，不是工期承诺）
 
@@ -465,6 +477,7 @@
 | 14 | ✅ 已完成（2026-11-01）：H30（A-conc-13）+ H31 验证者权限分级（`verifier.selftest.sh` 7 项） | S–M | 无 |
 | 15 | ✅ 已完成（2026-11-01）：H32 PR-ready 导出 + H33① 几何判据 + H33② 像素基线（`pixel.selftest.sh` 7 项） | M / S | 无 |
 | 16 | ✅ 已完成（2026-11-01）：H34 审计导出 + H36 外部触发（`trigger.selftest.sh` 9 项）+ H35 多分支 flex（`flexbranch.selftest.sh` 9 项） | S / L / S | H9（时长口径）、宿主定时器 |
+| 17 | ✅ 已完成（2026-11-01）H37 判定覆盖闸门（由 ContraRunner 实测倒逼；`status.selftest.sh` 例 14 共 5 项） | S | 无 |
 
 > 本组不产生任何 A#、不改变判定。表中每一项在实现时必须**自带关闭态逐字节等价测试**并补
 > `01-SPEC-0.9.md` 条目，否则不合入。
@@ -512,6 +525,7 @@
 | 视觉证据只有字节数，抓不到几何冲突 | 竞+本仓 | H33 | 已实现（①几何 + ②像素） | `probe-geometry.mjs` 求交 + `pixel_diff.py` 差占比与遮罩；解不出都判 SKIP 不判过 |
 | flex 只能单方案，无多分支对比 | 竞 | H35 | 已实现（默认关） | `flexbranch.py` ≤`branch_max` 分支；只有 Verifier 能定；结果只成提案，不进 `r-XX.passed` |
 | 无人值守过夜会停（没有外部触发接续） | 竞+实 | H36 | 已实现（默认关） | `trigger.py` 决策 + 锁 + 次数上限；会话仍由宿主开，待批项一律拦住 |
+| 未覆盖的验收项被静默当成已完成（run.sh 的 id 数组不全） | 实 | H37 | **已实现（硬闸门）** | `close-round` 与 `phase report` 双闸：verdict=pass 却有条目零判定 → 退 24 且零写盘；SKIP 算判定，fail 不拦 |
 | 没有观测栈导出（审计只在本地 jsonl） | 竞 | H34 | **已实现（显式调用才出）** | `export.py otel`：OTLP 风格 span，属性脱敏、零网络（A-ex-06） |
 | 记忆没有后台去重/整理（对标 Devin Memory+Dreaming） | 竞 | H2 + H24 | 待做 | 我们多签发归因，少每日整理 |
 | 对外口径把非独家能力当卖点（并行、角色隔离、不自动合并） | 竞 | 附二 + H29 | **已纠偏** | 只有五件套组合可称首现 |
