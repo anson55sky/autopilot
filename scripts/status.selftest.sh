@@ -814,6 +814,80 @@ EOF
     else
         fail 14 "fail 轮次被误拦（rc=$rc）：$out"
     fi
+# ---------------------------------------------------------------- H38 冻结前覆盖闸门
+
+mk_cov_repo() {  # $1=目录名 $2=契约条目串（空格分隔）$3=checks 里写到的条目 $4=数组里声明的条目
+    r="$TMPROOT/$1"; mkdir -p "$r/.autopilot/checks"
+    write_state "$r/.autopilot/state.json" "\"$(now_minus_aware 10)\""
+    {
+        printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| --- | --- | --- |\n'
+        for a in $2; do printf '| %s | 做 X | 看 Y |\n' "$a"; done
+    } > "$r/.autopilot/GOAL.md"
+    {
+        printf '#!/bin/sh\n'
+        [ -n "$4" ] && printf 'NODE_IDS=(%s)\n' "$4"
+        for a in $3; do printf 'echo "RESULT %s PASS ok"\n' "$a"; done
+    } > "$r/.autopilot/checks/run.sh"
+    printf '%s\n' "$r"
+}
+
+case_coverage_gate() {
+    # 1) 契约每条都有判定语句 → 放行
+    r=$(mk_cov_repo h38ok "A1 A2 A3" "A1 A2 A3" "A1 A2 A3")
+    out=$($PY "$STATUS" coverage "$r" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "H38 通过"; then
+        pass 15 "每条契约都在冻结面里有判定源时放行"
+    else
+        fail 15 "全覆盖却被拦（rc=$rc）：$out"
+    fi
+
+    # 2) 有条目完全没判定源 → 退 24，且 check.sh freeze 不落 MANIFEST
+    r=$(mk_cov_repo h38miss "A1 A2 A7" "A1 A2" "A1 A2")
+    out=$($PY "$STATUS" coverage "$r" 2>&1); rc=$?
+    freezeout=$(sh "$HERE/check.sh" freeze "$r" 2>&1); frc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "A7" && [ "$frc" -eq 24 ] \
+       && ! [ -f "$r/.autopilot/checks/MANIFEST.sha256" ]; then
+        pass 15 "缺判定源的条目拒绝核对也拒绝冻结（MANIFEST 没被写出来）"
+    else
+        fail 15 "冻结闸门没生效（rc=$rc frc=$frc）：$freezeout"
+    fi
+
+    # 3) 有判定语句但没进 *_IDS 数组 → 只 WEAK 提示，不拦（A40 那一类）
+    r=$(mk_cov_repo h38weak "A1 A2 A3" "A1 A2 A3" "A1 A2")
+    out=$($PY "$STATUS" coverage "$r" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "WEAK：A3"; then
+        pass 15 "有断言但未纳入兜底数组时给 WEAK 点名，不假装它安全也不硬拦"
+    else
+        fail 15 "WEAK 档不对（rc=$rc）：$out"
+    fi
+
+    # 4) 分批冻结：理由不足 20 字 → 24；够长 → 0 且落账本
+    r=$(mk_cov_repo h38part "A1 A2 A7 A8" "A1 A2" "A1 A2")
+    out=$($PY "$STATUS" coverage "$r" --allow-partial "先做前两条" 2>&1); rc=$?
+    if [ "$rc" -eq 24 ] && printf '%s' "$out" | grep -q "≥20"; then
+        pass 15 "分批冻结的短理由被拒（空话挡不住闸门）"
+    else
+        fail 15 "短理由没被拒（rc=$rc）：$out"
+    fi
+    out=$($PY "$STATUS" coverage "$r" --allow-partial "A7/A8 依赖手柄探针，本轮先冻结已实现的工装范围" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "分批冻结放行" \
+       && grep -q '"type": "coverage_partial"' "$r/.autopilot/ledger.jsonl"; then
+        pass 15 "够长的理由放行且落账本（可审计，REPORT 必须声明覆盖不完整）"
+    else
+        fail 15 "分批冻结或记账不对（rc=$rc）：$out"
+    fi
+
+    # 5) 老工作区（GOAL 没有矩阵行）行为不变
+    r2="$TMPROOT/h38legacy"; mkdir -p "$r2/.autopilot/checks"
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r2/.autopilot/GOAL.md"
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$r2/.autopilot/checks/run.sh"
+    out=$($PY "$STATUS" coverage "$r2" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "无契约条目可核对"; then
+        pass 15 "GOAL 里没有矩阵行时闸门完全不介入（0.8 老工作区照旧）"
+    else
+        fail 15 "老工作区被误伤（rc=$rc）：$out"
+    fi
+}
 }
 case_naive
 case_garbage
@@ -830,6 +904,7 @@ case_close_check
 case_clock_accounting
 case_multibudget
 case_coverage_check
+case_coverage_gate
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"

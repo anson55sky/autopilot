@@ -244,6 +244,7 @@ REPO={REPO_ROOT}
 bash $SKILL/scripts/init.sh --goal "目标" --repo $REPO
 bash $SKILL/scripts/init.sh --goal "目标" --repo $REPO --preset quickfix   # H22 不会写验收时选一档范式（quickfix|feature|longrun）
 bash $SKILL/scripts/check.sh freeze $REPO
+python3 $SKILL/scripts/status.py coverage $REPO --allow-partial "<≥20 字理由>"   # H38 分批冻结（落账本，REPORT 须声明覆盖不完整）
 bash $SKILL/scripts/check.sh verify $REPO
 bash $SKILL/scripts/check.sh run $REPO
 python3 $SKILL/scripts/resume.py $REPO            # 任何新会话先跑这个
@@ -325,6 +326,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 还原/回滚不落账（H11） | 事后无法区分"没动过"与"动过又还原"，冻结面漂移无从举证 | 当场 `status.py log` 一条 `type=revert`，带文件路径与还原前后 sha256 |
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
+| 契约写了 47 条、checks 只声明 17 条就冻结（H38） | 缺口被冻进 MANIFEST，一路带到报告都没人红 | `check.sh freeze` 会拒（退 24）；确需分批冻结用 `status.py coverage --allow-partial`，理由进账本并在 REPORT 声明 |
 | 未覆盖的验收项当已完成（H37） | 冻结通道少列一个 id 就永远不会红——假绿里最隐蔽的一种 | `close-round`/`phase report` 会拒（退 24）：补 RESULT 判定、给 SKIP 理由，或按事实改 verdict；给 checks 加 id 属契约动作，走提案 + 重冻 |
 | 多分支对比的胜出方案直接当验收通过（H35） | 探索产物污染判定，等价于自评自验 | `flexbranch.py pick` 只写 `sandbox/proposals/BRANCH_PICK-*.md`，须 merge 批准 + epoch+1 才生效；只有 Verifier 能定选择（退 31 剥夺） |
 | 并发版把 flex 卡也塞进调度器 | 探索分支绕过闸门与串行预算 | 第一版只调度 strict；flex 显示 `FLEX-SERIAL`，照串行 |

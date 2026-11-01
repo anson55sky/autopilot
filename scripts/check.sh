@@ -87,6 +87,14 @@ case "$cmd" in
       echo "run.sh 仍有 TODO-check 占位，补全验收后再冻结" >&2
       exit $E_USAGE
     fi
+    # H38 冻结前覆盖闸门：GOAL 矩阵里每条 A# 都得在 checks/ 找得到判定源，否则拒绝冻结。
+    # 装在 freeze 而不是收轮，是因为 ContraRunner 的缺陷正是"冻结时就只声明了 17/47 条"，
+    # 事后拦（H37）只会把已经冻错的判定面一路带到报告里。
+    if [ -f "$SCRIPT_DIR/status.py" ] && [ -f "$root/.autopilot/GOAL.md" ]; then
+      python3 "$SCRIPT_DIR/status.py" coverage "$root" || {
+        echo "冻结被拒：先补判定源或收窄契约（确需分批冻结：check.sh freeze 前用 status.py coverage --allow-partial "<理由>"）" >&2
+        exit 24; }
+    fi
     # 复用 environ.py 的 freeze（探测哈希实现，MANIFEST 字节格式与 0.8 一致）；
     # environ.py 不在时回退内建 shasum 管线（即 0.8 原样）。
     if [ -f "$SCRIPT_DIR/environ.py" ] \

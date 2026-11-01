@@ -850,6 +850,101 @@ def cmd_log(root, payload):
     return 0
 
 
+A_TOKEN_RE = re.compile(r"\bA\d{1,3}\b")
+CHECK_EXTS = (".sh", ".mjs", ".js", ".py", ".html", ".txt", ".md", ".json")
+
+
+def judging_sources(ap):
+    """冻结面里出现过的验收编号集合 = 潜在判定源。
+
+    只算会被 MANIFEST 保护的判定文件；`MANIFEST.sha256` / `last.log` / `last-result.json`
+    是产物或索引，出现过的编号不能当判定源。
+    """
+    cdir = os.path.join(os.path.abspath(ap), "checks")
+    found = set()
+    try:
+        names = sorted(os.listdir(cdir))
+    except OSError:
+        return found, cdir
+    for name in names:
+        if name in ("MANIFEST.sha256", "last.log", "last-result.json") or not name.endswith(CHECK_EXTS):
+            continue
+        try:
+            with open(os.path.join(cdir, name), encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        found.update(A_TOKEN_RE.findall(text))
+    return found, cdir
+
+
+IDS_ARRAY_RE = re.compile(r"^\s*[A-Za-z_]*IDS\w*=\(([^)]*)\)", re.M)
+
+
+def declared_ids(ap):
+    """run.sh 里 `*_IDS=(...)` 声明的编号——只有进了数组才享有三条兜底
+    （缺 node / 缺浏览器 / 探针未就绪 → 组内每条打 FAIL，而不是静默缺席）。"""
+    p = os.path.join(os.path.abspath(ap), "checks", "run.sh")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return set()
+    out = set()
+    for body in IDS_ARRAY_RE.findall(text):
+        out.update(A_TOKEN_RE.findall(body))
+    return out
+
+
+def cmd_coverage(root, allow_partial=""):
+    """H38 冻结前的覆盖闸门：GOAL 矩阵里的每条 A# 都得在 checks/ 里找得到判定源。
+
+    立规理由：H37 装在收轮处，属于"已经晚了"的位置。ContraRunner 的根因是**冻结时 run.sh
+    只声明了 17 条 id，而契约写了 47 条**——缺陷照样被冻进 MANIFEST。所以把它前移到 freeze。
+    `--allow-partial` 只给"分批冻结"这种真实场景：理由 ≥20 字、落账本、REPORT 必须声明。
+    """
+    ap = os.path.join(os.path.abspath(root), ".autopilot")
+    if not os.path.isdir(ap):
+        print("COVERAGE 2 没有 %s（先跑 init.sh）" % ap)
+        return 2
+    ids = acceptance_ids(ap)
+    if not ids:
+        print("COVERAGE 0 GOAL 里没有 | A# | 矩阵行——无契约条目可核对（老工作区行为不变）")
+        return 0
+    sources, cdir = judging_sources(ap)
+    if not sources:
+        print("COVERAGE 2 找不到 %s，或其中没有任何判定文件" % cdir)
+        return 2
+    missing = [i for i in ids if i not in sources]
+    weak = sorted((set(ids) & sources) - declared_ids(ap), key=lambda x: int(x[1:]))
+    print("COVERAGE 判定源核对：契约 %d 条 · 冻结面命中 %d 条 · 缺 %d 条 · 未纳入兜底数组 %d 条"
+          % (len(ids), len(set(ids) & sources), len(missing), len(weak)))
+    if weak:
+        print("  WEAK：%s%s —— 有判定语句但没进 run.sh 的 *_IDS 数组，"
+              "缺少 node/浏览器/探针未就绪三条兜底，异常退出时会静默缺席而不是变红"
+              % (" ".join(weak[:12]), " …" if len(weak) > 12 else ""))
+    if not missing:
+        print("COVERAGE 0 全部验收项在冻结面里都有判定源（H38 通过%s）"
+              % ("；WEAK 条目请自行判断是否纳入数组" if weak else ""))
+        return 0
+    print("  缺判定源：%s%s" % (" ".join(missing[:16]), " …" if len(missing) > 16 else ""))
+    reason = (allow_partial or "").strip()
+    if len(reason) >= 20:
+        append_ledger(ap, {"type": "coverage_partial", "missing": missing,
+                           "missing_count": len(missing), "reason": reason})
+        print("COVERAGE 0 分批冻结放行（理由已落账本）：剩余 %d 条必须在后续提案 + 重冻里补齐，"
+              "REPORT 必须声明本 epoch 覆盖不完整" % len(missing))
+        return 0
+    if reason:
+        print("COVERAGE 24 --allow-partial 的理由只有 %d 字（要求 ≥20）：写清为什么这批可以先不判"
+              % len(reason))
+    else:
+        print("COVERAGE 24 拒绝冻结：这些条目在 checks/ 里一条判定语句都没有。"
+              "先补判定源（或把工装产物一并放进 checks/），或把它们从本 epoch 的契约里移出去；"
+              "确需分批冻结用 --allow-partial \"<≥20 字理由>\"（落账本并要求 REPORT 声明）")
+    return 24
+
+
 def cmd_phase(root, phase):
     ap = os.path.join(root, ".autopilot")
     path = os.path.join(ap, "state.json")
@@ -1325,6 +1420,10 @@ def build_parser():
         p.add_argument("root", nargs="?", default=os.getcwd(), help="仓库目录")
         p.add_argument("--note", default="", help="原因，进账本")
 
+    p_cov = sub.add_parser("coverage", help="冻结前覆盖闸门（H38）：GOAL 每条 A# 都要在 checks/ 里有判定源")
+    p_cov.add_argument("root", nargs="?", default=os.getcwd(), help="仓库目录")
+    p_cov.add_argument("--allow-partial", default="", help="分批冻结的理由（≥20 字，落账本）")
+
     p_budget = sub.add_parser("budget", help="加设/收紧多维预算（H8/H23，只准收紧）")
     p_budget.add_argument("root", help="仓库目录")
     p_budget.add_argument("assign", nargs=argparse.REMAINDER, help="max_tool_calls=400 [max_usd=20]")
@@ -1340,6 +1439,8 @@ def dispatch(args):
             print("用法: status.py log <root> '<json事件>'")
             return 2
         return cmd_log(os.path.abspath(args.root), payload)
+    if args.cmd == "coverage":
+        return cmd_coverage(os.path.abspath(args.root), args.allow_partial)
     if args.cmd == "phase":
         return cmd_phase(os.path.abspath(args.root), args.phase)
     if args.cmd in ("pause", "resume"):

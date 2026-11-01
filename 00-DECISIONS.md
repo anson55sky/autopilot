@@ -456,6 +456,19 @@
   没有 GOAL 矩阵行（老工作区、刚 init）时闸门完全不介入，行为与旧版一致。
   证据：`scripts/status.selftest.sh` 例 14（5 项断言：拒收 + 零写盘、SKIP 放行、无矩阵不介入、
   report 闸门、fail 不介入）+ `status.py` 的 `COVERAGE CHECK` 与 `latest_round_doc()` 退 24
+- **H38 冻结前覆盖闸门（已实现，H37 的前移）。** H37 装在收轮处，位置本身就晚了：ContraRunner 的
+  根因是**冻结时 `run.sh` 只声明了 17 条 id，而契约写了 47 条**，缺陷照样被冻进 MANIFEST 一路带到报告。
+  新增 `status.py coverage --repo`，并接进 `check.sh freeze`（在写 MANIFEST 之前）：
+  ① 契约里每条 `A#` 都必须在 `checks/` 的判定文件里出现，否则 **退 24 且拒绝冻结**（MANIFEST 不落盘）；
+  ② 只出现在判定文件、**没进 `*_IDS=(...)` 数组**的条目给 `WEAK` 点名（它们不受"缺 node / 缺浏览器 /
+  探针未就绪"三条兜底保护，异常退出时静默缺席而不是变红——A40 正是这一类），只提示不拦；
+  ③ 分批冻结走 `--allow-partial "<≥20 字理由>"`：短理由退 24，够长理由放行并落
+  `{"type":"coverage_partial"}` 账本，REPORT 必须声明本 epoch 覆盖不完整；
+  ④ GOAL 没有矩阵行（0.8 老工作区、刚 init）时完全不介入。
+  实测在真实工作区上立刻跑出比人工核对更准的数：**契约 47 / 冻结面命中 31 / 缺 16**（我此前手工
+  按数组数出来的"缺 30 条"混用了两种口径，H38 把它拆成"完全无判定源 16 条 + 有断言但未纳数组"）。
+  证据：`scripts/status.selftest.sh` 例 15（6 项断言）；`tools/e2e-smoke.sh` 22/22 与
+  `tools/migration_rehearsal.sh` 16/16 在新闸门下仍然全绿（老流程不被打断）
 
 #### H 组落地顺序（裁决后的排期，不是工期承诺）
 
@@ -478,6 +491,7 @@
 | 15 | ✅ 已完成（2026-11-01）：H32 PR-ready 导出 + H33① 几何判据 + H33② 像素基线（`pixel.selftest.sh` 7 项） | M / S | 无 |
 | 16 | ✅ 已完成（2026-11-01）：H34 审计导出 + H36 外部触发（`trigger.selftest.sh` 9 项）+ H35 多分支 flex（`flexbranch.selftest.sh` 9 项） | S / L / S | H9（时长口径）、宿主定时器 |
 | 17 | ✅ 已完成（2026-11-01）H37 判定覆盖闸门（由 ContraRunner 实测倒逼；`status.selftest.sh` 例 14 共 5 项） | S | 无 |
+| 18 | ✅ 已完成（2026-11-01）H38 冻结前覆盖闸门（`status.selftest.sh` 例 15 共 6 项；e2e 22/22 与迁移彩排 16/16 不受打断） | S | 无 |
 
 > 本组不产生任何 A#、不改变判定。表中每一项在实现时必须**自带关闭态逐字节等价测试**并补
 > `01-SPEC-0.9.md` 条目，否则不合入。
@@ -526,6 +540,7 @@
 | flex 只能单方案，无多分支对比 | 竞 | H35 | 已实现（默认关） | `flexbranch.py` ≤`branch_max` 分支；只有 Verifier 能定；结果只成提案，不进 `r-XX.passed` |
 | 无人值守过夜会停（没有外部触发接续） | 竞+实 | H36 | 已实现（默认关） | `trigger.py` 决策 + 锁 + 次数上限；会话仍由宿主开，待批项一律拦住 |
 | 未覆盖的验收项被静默当成已完成（run.sh 的 id 数组不全） | 实 | H37 | **已实现（硬闸门）** | `close-round` 与 `phase report` 双闸：verdict=pass 却有条目零判定 → 退 24 且零写盘；SKIP 算判定，fail 不拦 |
+| 覆盖缺口在冻结时才没被检查，缺陷被冻进 MANIFEST | 实 | H38 | **已实现** | `check.sh freeze` 前跑 `status.py coverage`：无判定源退 24 拒绝冻结；未进 `*_IDS` 数组给 WEAK；分批冻结要理由并落账本 |
 | 没有观测栈导出（审计只在本地 jsonl） | 竞 | H34 | **已实现（显式调用才出）** | `export.py otel`：OTLP 风格 span，属性脱敏、零网络（A-ex-06） |
 | 记忆没有后台去重/整理（对标 Devin Memory+Dreaming） | 竞 | H2 + H24 | 待做 | 我们多签发归因，少每日整理 |
 | 对外口径把非独家能力当卖点（并行、角色隔离、不自动合并） | 竞 | 附二 + H29 | **已纠偏** | 只有五件套组合可称首现 |
