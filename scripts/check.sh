@@ -97,8 +97,8 @@ case "$cmd" in
       else
         python3 "$SCRIPT_DIR/status.py" coverage "$root" || {
           echo "冻结被拒：这些条目在 checks/ 里没有判定语句。先补判定源或收窄契约；" >&2
-          echo "确需分批冻结就带 ≥20 字理由重跑：" >&2
-          echo "  AUTOPILOT_FREEZE_ALLOW_PARTIAL=\'<理由>\' bash check.sh freeze <仓库目录>" >&2
+          echo '确需分批冻结就带 ≥20 字理由重跑（整段用单引号包住即可）：' >&2
+          echo '  AUTOPILOT_FREEZE_ALLOW_PARTIAL="<理由>" bash check.sh freeze <仓库目录>' >&2
           exit 24; }
       fi
     fi
