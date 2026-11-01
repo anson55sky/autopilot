@@ -343,3 +343,15 @@ rsync -a --exclude .git --exclude __pycache__ /tmp/autopilot-conc-096/ ~/.qoder-
     WavePeek 冻结验收 8/8、MANIFEST 一致、对抗模糊 71/71。
   - **WavePeek 侧**：CP-002 草稿（WavePeek 的 4 条新增验收，add）已放到规范目录 `sandbox/proposals/`，无批准时
     `validate` 返回 31；未合并、epoch 仍为 1。`REPORT.md` / `BACKLOG.md` 已按完成测试结果更新。
+- 2026-11-01 夜间 **H39 lite 档交付完成，版本 0.9.6-detour → 0.9.7-lite**（无需授权：全程本地文件改动，
+  未 push、未发布、未动任何工作区外的东西）。入口 `init.sh --goal "一句话" --repo … --lite`，
+  收尾 `intake.py brief` 一屏结论页；`check.sh run` 判定**收紧**一处：0 条真 PASS（全 SKIP）从退 0 改退 1，
+  `check.sh.selftest.sh` 的 C10 因此拆成「有 PASS+有 SKIP→退 0+警示」与新增 C17「全 SKIP→退 1」。
+  自测期间抓到并修掉三个真缺陷：人只填了矩阵一列时不被识别为"人写契约"（覆盖保护漏口）、
+  重复起草会把模板里的判定口径注释一起吃掉、lite 声明会叠出第二份。
+  线上目录即工作目录（`~/.qoder-cn/skills/autopilot`），草稿 `/tmp/autopilot-conc-096` 已用
+  `rsync -a --delete`（排除 `.git`/`__pycache__`/`*.pyc`）反向对齐，`diff -rq` 无差异。
+  复验全绿：26 套自测（含新增 `intake.selftest.sh` 20 项）+ schema 17/0 + xref 7/7 + 隐私 FAIL 0 +
+  命令冒烟 97/97 + e2e 22/22 + 元验收 10 PASS/1 SKIP + 迁移彩排 16/16。本地 commit `0efb024`，未 push。
+  仍欠：ContraRunner v2.1 自动接续的第 1 轮还没产生（`rounds/` 仍空，定时器 jobId `f0d7ca8c-…` 未停）；
+  `tools/dashboard.py` 没有判定覆盖率卡片；H33② 像素基线没接进 ContraRunner 自己的 `checks/`。
