@@ -1,5 +1,6 @@
 #!/bin/sh
-# P2 并发调度自测：A-conc-01..13（11 kill/上限来源，12 非幂等闸，13 H30 可重放）。
+# P2 并发调度自测：A-conc-01..15（11 kill/上限来源，12 非幂等闸，13 H30 可重放，
+# 14 判定文件写集闸 H40，15 尺子冻结态闸 H42）。
 # 只在 mktemp -d 造临时工作区，不碰真实仓库、不碰线上 skill。
 # 判定口径：每例一行 PASS/FAIL；任何 FAIL 退出 1。
 set -u
@@ -144,6 +145,113 @@ EOF
     else
         fail 13 "时钟调用点过多（$uses_time 处），重放语义存疑"
     fi
+}
+
+# A-conc-15 尺子冻结态闸门（H42：判定面不在冻结态就不许派工）
+freeze_manifest_sh() {
+    $PY - "$1/.autopilot/checks" <<'PY'
+import hashlib, os, sys
+cdir = sys.argv[1]
+lines = []
+for cur, dirs, files in os.walk(cdir):
+    dirs.sort()
+    for f in sorted(files):
+        if f in ("MANIFEST.sha256", "last.log", "last-result.json", ".DS_Store"):
+            continue
+        full = os.path.join(cur, f)
+        rel = os.path.relpath(full, cdir).replace(os.sep, "/")
+        h = hashlib.sha256(open(full, "rb").read()).hexdigest()
+        lines.append("%s  ./%s" % (h, rel))
+open(os.path.join(cdir, "MANIFEST.sha256"), "w", encoding="utf-8").write(
+    "\n".join(sorted(lines)) + "\n")
+PY
+}
+
+case_ruler_drift_gate() {
+    repo=$(new_repo a15)
+    goal_on "$repo"
+    mkdir -p "$repo/.autopilot/checks"
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo/.autopilot/checks/run.sh"
+    printf '<html>RESULT A2 PASS</html>\n' > "$repo/.autopilot/checks/probe-x.html"
+    freeze_manifest_sh "$repo"
+    write_tasks "$repo" <<EOF
+{"tasks": [
+ {"id": "T-71", "title": "T-71", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["src/a.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-71.md"},
+ {"id": "T-72", "title": "T-72", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["src/b.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-72.md"}
+], "epoch": 0}
+EOF
+
+    # 干净冻结态：正常可派，闸门不得碍事
+    $PY "$SCHED" start --repo "$repo" --task T-71 >"$TMPROOT/a15.clean" 2>&1
+    expect_rc 15 0 "$?" "MANIFEST 一致时正常派工不受影响"
+
+    # ① 在册文件被改 = drift
+    printf 'relaxed\n' >> "$repo/.autopilot/checks/probe-x.html"
+    $PY "$SCHED" start --repo "$repo" --task T-72 >"$TMPROOT/a15.drift" 2>&1
+    expect_rc 15 24 "$?" "冻结后改了在册判定文件 → 拒绝派工"
+    expect_contains 15 "$TMPROOT/a15.drift" "不在冻结态" "拒绝理由写明尺子状态"
+
+    $PY "$SCHED" start --repo "$repo" --task T-72 --allow-ruler-drift >"$TMPROOT/a15.noflag" 2>&1
+    expect_rc 15 2 "$?" "漂移态放行必须配 --note 理由"
+
+    $PY "$SCHED" start --repo "$repo" --task T-72 --allow-ruler-drift \
+        --note "控制器 2026-11-02 已逐行 diff 确认只更严" >"$TMPROOT/a15.rel" 2>&1
+    expect_rc 15 0 "$?" "带理由的显式放行可以派"
+    if $PY - "$repo/.autopilot/ledger.jsonl" <<'PY'
+import json, sys
+ev = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+hit = [e for e in ev if e.get("task") == "T-72" and e.get("ruler_drift")]
+clean = [e for e in ev if e.get("task") == "T-71" and e.get("ruler_drift")]
+sys.exit(0 if len(hit) == 1 and hit[0]["ruler_drift"]["status"] == "drift"
+         and not clean else 1)
+PY
+    then pass 15 "漂移态放行进账本（可审计谁在哪种尺子状态下放的行），干净态不污染该字段"
+    else fail 15 "ruler_drift 留痕不对"; fi
+
+    # ② 未登记的新判定文件：shasum -c 对它永远绿，必须单独抓
+    repo2=$(new_repo a15b)
+    goal_on "$repo2"
+    mkdir -p "$repo2/.autopilot/checks"
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo2/.autopilot/checks/run.sh"
+    freeze_manifest_sh "$repo2"
+    write_tasks "$repo2" <<EOF
+{"tasks": [
+ {"id": "T-81", "title": "T-81", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["src/a.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-81.md"}
+], "epoch": 0}
+EOF
+    printf '<html>RESULT A9 PASS</html>\n' > "$repo2/.autopilot/checks/probe-late.html"
+    $PY "$SCHED" start --repo "$repo2" --task T-81 >"$TMPROOT/a15b.unreg" 2>&1
+    expect_rc 15 24 "$?" "冻结后新增的判定文件不在 MANIFEST → 拒绝派工"
+    expect_contains 15 "$TMPROOT/a15b.unreg" "probe-late.html" "点名是哪份文件游离在冻结外"
+
+    # ③ 没有 checks/ 的串行/早期工作区：不得被误拦
+    repo3=$(new_repo a15c)
+    goal_on "$repo3"
+    write_tasks "$repo3" <<EOF
+{"tasks": [
+ {"id": "T-91", "title": "T-91", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["src/a.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-91.md"}
+], "epoch": 0}
+EOF
+    $PY "$SCHED" start --repo "$repo3" --task T-91 >"$TMPROOT/a15c.nochecks" 2>&1
+    expect_rc 15 0 "$?" "没有判定面的工作区不误拦"
+
+    # ④ 有 checks/ 但从未冻结：违反前置，拦
+    repo4=$(new_repo a15d)
+    goal_on "$repo4"
+    mkdir -p "$repo4/.autopilot/checks"
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo4/.autopilot/checks/run.sh"
+    write_tasks "$repo4" <<EOF
+{"tasks": [
+ {"id": "T-95", "title": "T-95", "role": "Builder", "status": "pending", "deps": [],
+  "write_set": ["src/a.js"], "acceptance": ["A1"], "card": ".autopilot/tasks/T-95.md"}
+], "epoch": 0}
+EOF
+    $PY "$SCHED" start --repo "$repo4" --task T-95 >"$TMPROOT/a15d.noman" 2>&1
+    expect_rc 15 24 "$?" "checks/ 存在但从未冻结 → 拒绝派工"
 }
 
 case_disabled_equivalence() {
@@ -712,6 +820,7 @@ case_flex_serial
 case_kill_and_limit_source
 case_idempotent_gate
 case_replay_determinism
+case_ruler_drift_gate
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"

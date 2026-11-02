@@ -474,6 +474,23 @@ def cmd_start(args):
             if clash:
                 print("CONFLICT %s 写集与运行中卡重叠: %s" % (args.task, ",".join(clash)))
                 return E_CONFLICT
+            # H42：尺子不在冻结态就别派工。drift/unregistered/no_manifest 三种都意味着
+            # 工人跑回来的 RESULT 行不受冻结保护 —— 红绿无法归因到底是产品变了还是考卷变了。
+            # ContraRunner r-02 实测：19:44 冻结后 T-13/T-23 改了 probes，MANIFEST 没重冻，
+            # 于是「18 条从 FAIL 转 PASS」这件事在盘上无法自证是产品交付还是尺子漂移。
+            rstatus, rlines = status_mod.ruler_audit(args.repo)
+            if rstatus != "ok":
+                if not args.allow_ruler_drift:
+                    print("STATE ERROR 判定面不在冻结态（%s），%s 不得派工：" % (rstatus, args.task))
+                    for l in rlines:
+                        print("    - %s" % l)
+                    print("  此时任何 RESULT 行都不受冻结保护，红绿无法归因。尺子是判定侧，"
+                          "控制器无权自冻：走 inbox 请人重冻（或回退改动）；"
+                          "确需在漂移态派工才 start --allow-ruler-drift --note <理由>")
+                    return E_STATE
+                if not (args.note or "").strip():
+                    print("用法 --allow-ruler-drift 必须带 --note <理由>，理由要能审计")
+                    return E_USAGE
             edits = checks_edits(args.repo, task)
             if edits and not args.allow_checks_edit:
                 print("STATE ERROR %s 写集里含**已冻结的判定文件**：%s —— "
@@ -506,6 +523,9 @@ def cmd_start(args):
                 "idempotent": task.get("idempotent"),
                 "checks_edit": edits if args.allow_checks_edit else [],
             }
+            if args.allow_ruler_drift:
+                # 谁授权的、在什么状态下授权的，必须能从账本读出来
+                worker_event["ruler_drift"] = {"status": rstatus, "files": rlines}
             if args.allow_non_idempotent:
                 worker_event["human_release"] = args.note
             status_mod.append_ledger(ap, worker_event)
@@ -685,6 +705,8 @@ def build_parser():
                    help="人工放行 idempotent=false 且已派过的卡（必须配 --note 理由）")
     s.add_argument("--allow-checks-edit", dest="allow_checks_edit", action="store_true",
                    help="放行「写集含已存在的判定文件」的卡（H40：改考卷必须显式理由并落账本）")
+    s.add_argument("--allow-ruler-drift", dest="allow_ruler_drift", action="store_true",
+                   help="放行「判定面不在冻结态」的派工（H42：必须配 --note 理由，并落账本）")
     s.set_defaults(fn=cmd_start)
 
     s = sub.add_parser("finish"); s.add_argument("--repo", required=True)

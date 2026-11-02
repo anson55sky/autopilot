@@ -183,6 +183,20 @@ while 未触发停止条件:
 判据读的是哪个文件的字段，卡就得写那个文件（T-18 派给 render.js 做 A24/A25 就是这么废的，
 15 分钟 + 680 万 token 换一句派工前可机检的话）。该行只报告，不改判定、不改退出码。
 
+**派工前先审尺子的冻结态（H42）**：`start` 在任何写动作之前调 `status.py ruler_audit()`，三档都退 **24**：
+`drift`（MANIFEST 在册文件哈希与冻结值不符）、`unregistered`（冻结之后新增的判定文件根本不在 MANIFEST 里——
+`shasum -c` 只核对在册文件，对未登记文件**永远绿**，这是一整类静默失效）、`no_manifest`（有 checks/ 却从未冻结）。
+此时跑出来的任何 RESULT 行都不受冻结保护，红绿无法归因到底是产品变了还是考卷变了；
+放行只认 `start --allow-ruler-drift --note <理由>`（无 note 退 2），尺子状态原文落进账本 `ruler_drift` 字段。
+没有 checks/ 的串行/早期工作区返回 ok，这条闸门不误拦。
+`check.sh freeze` 现在除哈希外还把内容存成 `.autopilot/frozen-checks.tar`（在 checks/ 外，永不自己触发漂移），
+`verify` 检出漂移时直接打印可执行的 `diff -u` 对账命令并点名文件——只存哈希回答不了「这次改动是否只更严」，
+而那正是铁律「判定只更严」唯一可查的形式。
+H40 管「这张卡要不要动尺子」、H41 管「尺子接没接上」、H42 管「尺子还是不是冻住的那把」，三道闸门各自独立。
+实证：ContraRunner r-02 里 19:44 重冻后我又派了写探针页的卡且没重冻，`verify` rc=4；
+更严重的是 `probe-ui.html` 在 `--virtual-time-budget` 下**整页零上报**（上报只写在末行 `:953`，
+而 a42 段 `:663` 的 `await fetch` 在虚拟时间里永不 resolve），把原本已绿的 A13/A14/A17 一起判死。
+
 ```sh
 python3 $SKILL/scripts/dag_scheduler.py config  --repo $REPO --enabled
 python3 $SKILL/scripts/dag_scheduler.py config  --repo $REPO --json
@@ -357,6 +371,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 还原/回滚不落账（H11） | 事后无法区分"没动过"与"动过又还原"，冻结面漂移无从举证 | 当场 `status.py log` 一条 `type=revert`，带文件路径与还原前后 sha256 |
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
 | 把判定文件当普通源码派给工人（H40） | 被考核的人手里握着考卷：把 FAIL 改成 SKIP 在结构上无人可拦 | 新增判定源（checks/ 下还没有的文件）可派工；改既有判定文件必须 `start --allow-checks-edit --note <理由>`，文件清单与理由进 worker 账本事件 |
+| 在尺子已漂移/未登记的冻结面上继续派工与收轮（H42） | RESULT 行不受冻结保护，红绿无法归因是产品变了还是考卷变了；未登记文件对 `shasum -c` 永远绿，属静默失效 | 先 `check.sh verify`；红了就走 inbox 请人重冻或回退，确需带病派工才 `--allow-ruler-drift --note`，且不得据此收轮 |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
 | lite 把自动起草的矩阵当用户已经批准的口径（H39） | 判定标准是机器猜的，却以「你要的做完了」交付 | `intake.json.needs_human_confirm` 逐条转给人；`intake.py brief` 的第一行必须是那句「觉得不对你说」；0 条真 PASS 时 `check.sh run` 退 1，结论页只许写「未完成」 |
 | 契约写了 47 条、checks 只声明 17 条就冻结（H38） | 缺口被冻进 MANIFEST，一路带到报告都没人红 | `check.sh freeze` 会拒（退 24）；确需分批冻结用 `status.py coverage --allow-partial`，理由进账本并在 REPORT 声明 |

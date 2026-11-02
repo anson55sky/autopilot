@@ -200,6 +200,7 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 | H40 | `dag_scheduler.py start` 内置 `checks_edits()`：卡的写集里若有**盘上已存在**的 `.autopilot/checks/**` 文件 → 退 **24** 拒绝派发；checks/ 下尚不存在的新判定源（探针页）直接放行；改考卷须 `start --allow-checks-edit --note <理由>`（无 note 退 2），理由与文件清单写进 worker 账本事件的 `checks_edit` 字段 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；普通源码卡行为不变 | `dag-scheduler.selftest.sh` A-conc-14（8 项断言） |
 
 | H41 | `status.py coverage` 多一档 `UNWIRED`：拿 run.sh 已声明的 `A#:探针键` 映射表去 checks/ 的页面与产物里找那个键，找不到就点名「现在拿不到 PASS，缺的是尺子那一格」；只报告、不改判定、不动退出码（结果仍只认冻结 run.sh 的 RESULT 行） | 提示级（派工前给控制器看，不参与判定） | `status.selftest.sh` 例 16（2 项）+ ContraRunner 实测 14 条未接键 |
+| H42 | 派工前审「尺子还是不是那把被冻住的尺子」：`status.py ruler_audit()` 出三档 `drift`（在册文件哈希与冻结值不符）/ `unregistered`（冻结后新增的判定文件不在 MANIFEST，`shasum -c` 对它永远绿）/ `no_manifest`（有 checks/ 却从未冻结）；`dag_scheduler start` 在任何写动作前拦，退 **24**；放行只认 `--allow-ruler-drift --note <理由>`（无 note 退 2），尺子状态原文落账本 `ruler_drift` 字段。无 checks/ 的串行/早期工作区返回 ok 不误拦。同时 `check.sh freeze` 除哈希外存 `​.autopilot/frozen-checks.tar` 内容快照（在 checks/ 外，永不自己触发漂移），`verify` 检出漂移时打印可执行的 `diff -u` 对账命令并点名文件 —— 只存哈希回答不了「改动是否只更严」 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；H40 管要不要动尺子、H41 管尺子接没接上、H42 管尺子还是不是冻住那把，三道闸门各自独立 | `dag-scheduler.selftest.sh` A-conc-15（10 项）+ `check.sh.selftest.sh` C18…C21（4 项）+ ContraRunner 实测（rc=4 漂移、probe-editor 未登记、probe-ui 虚拟时间下零上报已复现） |
 ---
 
 ## 3. 新增：预算隔离

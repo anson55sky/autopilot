@@ -26,6 +26,7 @@ CLI 与 0.8 完全兼容（同样的子命令、同样的参数名），0.9 是�
 import argparse
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
@@ -890,6 +891,94 @@ def judging_sources(ap):
 IDS_ARRAY_RE = re.compile(r"^\s*[A-Za-z_]*IDS\w*=\(([^)]*)\)", re.M)
 
 
+MANIFEST_LINE_RE = re.compile(r"^([0-9a-f]{64})\s+\*?\./(.+)$")
+
+# 与 check.sh freeze 的排除集保持一致：这些是索引/产物/系统文件，不参与「在册」判定。
+# .DS_Store 漏掉会让每个 macOS 工作区假阳。
+MANIFEST_EXEMPT = ("MANIFEST.sha256", "last.log", "last-result.json", ".DS_Store")
+
+
+def ruler_audit(root):
+    """派工前审尺子：冻结面是否仍是冻结面。返回 (status, lines)。
+
+    ContraRunner r-02 实测的两类事故都在这里，且都是派工前就能机检出来的：
+      drift        —— 冻结后 checks/ 里在册文件被改，MANIFEST 没跟着重冻；
+      unregistered —— 新的判定源文件（真发 RESULT A#）建在冻结之后，压根没进 MANIFEST，
+                      `shasum -c` 只核对在册文件，对它永远"绿"，等于判定面脱离冻结保护。
+    这两类都不该等工人跑 15 分钟回来才发现：此时 RESULT 行的可信度已经是零。
+    """
+    ap = os.path.join(os.path.abspath(root), ".autopilot")
+    cdir = os.path.join(ap, "checks")
+    man = os.path.join(cdir, "MANIFEST.sha256")
+    if not os.path.isdir(cdir):
+        # 还没有判定面（串行流程 / 冻结前的早期阶段）——这不是漂移，别拦派工。
+        return "ok", []
+    if not os.path.isfile(man):
+        return "no_manifest", ["checks/ 存在但没有 MANIFEST.sha256：先 check.sh freeze，否则判定面无冻结保护"]
+
+    registered = {}
+    try:
+        with open(man, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = MANIFEST_LINE_RE.match(line.rstrip("\n"))
+                if m:
+                    registered[m.group(2)] = m.group(1)
+    except OSError:
+        return "no_manifest", ["MANIFEST.sha256 读不出来"]
+
+    mismatch = []
+    for rel, want in sorted(registered.items()):
+        p = os.path.join(cdir, rel)
+        if not os.path.exists(p):
+            mismatch.append("%s：在册但盘上不存在" % rel)
+            continue
+        try:
+            with open(p, "rb") as fh:
+                got = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            mismatch.append("%s：读不出来，无法核验" % rel)
+            continue
+        if got != want:
+            mismatch.append("%s：哈希与冻结值不符" % rel)
+
+    unregistered = []
+    # freeze 的口径是「checks/ 下除产物外全部登记」（含子目录，find -type f），所以凡是不在册的文件，
+    # 必然是冻结之后新增的 —— 它整体游离在冻结保护之外。不能只挑「文件里写了 RESULT A#」的：
+    # ContraRunner 的 probe-editor.html 自身不发 RESULT（键名映射住在 run.sh 的组表里），
+    # 那样会漏掉它，而它恰恰承载 A29/A30/A31/A46 四条判定源。
+    ondisk = []
+    for cur, dirs, files in os.walk(cdir):
+        dirs.sort()
+        for f in sorted(files):
+            full = os.path.join(cur, f)
+            rel = os.path.relpath(full, cdir).replace(os.sep, "/")
+            ondisk.append(rel)
+    for rel in ondisk:
+        if rel in registered or os.path.basename(rel) in MANIFEST_EXEMPT:
+            continue
+        unregistered.append("%s：不在 MANIFEST 里（冻结之后新增，整份文件不受冻结保护）" % rel)
+
+    if mismatch:
+        return "drift", mismatch + unregistered
+    if unregistered:
+        return "unregistered", unregistered
+    return "ok", []
+
+
+def cmd_ruler(root):
+    status, lines = ruler_audit(root)
+    print("RULER %s" % status)
+    for l in lines:
+        print("  - %s" % l)
+    if status == "ok":
+        print("判定面与冻结面一致，且无未登记的判定源。")
+        return 0
+    print("含义：现在跑出来的任何 RESULT 行都不在冻结保护下 —— 别拿它当验收结论，更别据此收轮。")
+    print("处置：尺子是判定侧，控制器无权自冻。走 inbox 请人裁决重冻（或回退改动后重冻），"
+          "确需在漂移态继续派工才带 --allow-ruler-drift --note <理由>。")
+    return 24
+
+
 PAIR_MAP_RE = re.compile(r"""['"](A\d{1,3}):([A-Za-z][\w-]*)['"]""")
 
 
@@ -1510,6 +1599,9 @@ def build_parser():
     p_cov.add_argument("root", nargs="?", default=os.getcwd(), help="仓库目录")
     p_cov.add_argument("--allow-partial", default="", help="分批冻结的理由（≥20 字，落账本）")
 
+    p_ruler = sub.add_parser("ruler", help="派工前审尺子冻结态（H42）：漂移/未登记/未冻结三档都拦")
+    p_ruler.add_argument("root", nargs="?", default=os.getcwd(), help="仓库目录")
+
     p_budget = sub.add_parser("budget", help="加设/收紧多维预算（H8/H23，只准收紧）")
     p_budget.add_argument("root", help="仓库目录")
     p_budget.add_argument("assign", nargs=argparse.REMAINDER, help="max_tool_calls=400 [max_usd=20]")
@@ -1527,6 +1619,8 @@ def dispatch(args):
         return cmd_log(os.path.abspath(args.root), payload)
     if args.cmd == "coverage":
         return cmd_coverage(os.path.abspath(args.root), args.allow_partial)
+    if args.cmd == "ruler":
+        return cmd_ruler(os.path.abspath(args.root))
     if args.cmd == "phase":
         return cmd_phase(os.path.abspath(args.root), args.phase)
     if args.cmd in ("pause", "resume"):

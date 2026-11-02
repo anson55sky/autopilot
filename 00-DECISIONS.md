@@ -456,6 +456,33 @@
   BUSY 时**不**给解锁命令（不引诱宿主抢锁）。
   证据：`scripts/trigger.selftest.sh` A-tr-01…15（16 项：关闭态、锁、上限、待批优先、阶段停止、
   零活动解锁、有活动不抢（含超 TTL 也不抢）、TTL 零活动解锁、decide 两面、claim 与 release 同判据）
+- **H42 尺子冻结态闸门 + 冻结内容快照（已实现，ContraRunner r-02 由两名独立验证员分别踩出、我独立复现）。**
+  19:44 重冻之后，我仍然派了写 `checks/probe-*.html` 的卡（T-13/T-23）且没随步重冻 —— 于是
+  「18 条从 FAIL 转 PASS」这件事在盘上**无法归因**：到底是产品交付了，还是考卷被改了。
+  `check.sh verify` 实测 rc=4，`probe-ui.html`/`probe-audio.html` 哈希与冻结值不符，
+  而 `probe-editor.html` 承载 A29/A30/A31/A46 四条判定源却**完全不在 MANIFEST 里**
+  （`shasum -c` 只核对在册文件，对未登记文件永远"绿"——这是一整类静默失效）。
+  更狠的是尺子**功能性坏了**：我用 headless Chrome `--virtual-time-budget=45000 --dump-dom` 复现，
+  DOM 41066 字节（页面渲染了）但 `data-probe` 命中 **0**。根因定位到行：上报只在
+  `probe-ui.html:953` 最后一行执行，而 a42 段 `:659/:663` 有 5 次 `await w2.fetch(f)`，
+  虚拟时间不推进网络 → await 永不 resolve → 控制流走不到 :953。T-23 把 a42 塞进同一条线性 async
+  流程，等于把**整个 UIX 组的浏览器判定判死**，包括原本已绿的 A13/A14/A17。
+  落两道机制：
+  ① `status.py ruler_audit()` 三档口径（drift / unregistered / no_manifest），
+     `dag_scheduler start` 在**任何写动作之前**拦，退 **24**；放行只认
+     `--allow-ruler-drift --note <理由>`（无 note → 2），并把尺子状态原文落进账本 `ruler_drift`
+     字段，事后能审计"谁在哪种尺子状态下放的行"。**没有 checks/ 的串行/早期工作区返回 ok**，
+     不误拦（这是用例 ③ 专门守的方向）。
+  ② `check.sh freeze` 除哈希外再存 `.autopilot/frozen-checks.tar` 内容快照（落在 checks/ 外，
+     永不自己触发漂移），`verify` 检出漂移时直接打印**可执行的 `diff -u` 对账命令**并点名文件。
+     只存哈希的冻结回答不了「改动是否只更严」——那正是铁律「判定只更严」唯一可查的形式。
+  它和 H40/H41 是三条独立闸门：H40 管「这张卡要不要动尺子」，H41 管「尺子有没有接上」，
+  H42 管「尺子现在还是不是那把被冻住的尺子」。 ContraRunner 现状：H42 起效后本仓所有派工被拦，
+  第 2 轮只能停在 I-4 等裁 —— 这是设计意图，不是故障。
+  证据：`scripts/dag-scheduler.selftest.sh` A-conc-15（10 项：干净态不误拦、drift 退 24、理由写明状态、
+  无 note 退 2、带 note 放行、进账本且干净态不污染字段、未登记新增文件退 24 且点名、
+  无 checks/ 不误拦、有 checks/ 从未冻结退 24）；`scripts/check.sh.selftest.sh` C18…C21（4 项：
+  快照落盘且含判定文件、快照不进哈希范围、漂移打印 diff 对账命令、还原后复绿证明快照同源）
 - **H41 未接键报告（已实现，H40 同一轮里连着踩出来的）。** T-18 派给 `src/render.js` 做 A24/A25，
   工人跑回来说「判据读的是 `createGame()` 上的字段，node 路径根本不加载 render.js」——
   15 分钟和 680 万 token 换一句我派工前就能机检的话。同类错配还有 9 条：A26-A28/A34-A35/A37-A39/A42
@@ -574,6 +601,7 @@
 | 20 | ✅ 已完成（2026-11-01）H40 判定文件写集闸门（`dag-scheduler.selftest.sh` A-conc-14，8 项） | S | 无 |
 > 本组不产生任何 A#、不改变判定。表中每一项在实现时必须**自带关闭态逐字节等价测试**并补
 | 21 | ✅ 已完成（2026-11-01）H41 未接键报告 UNWIRED（`status.selftest.sh` 例 16，2 项） | S | 无 |
+| 22 | ✅ 已完成（2026-11-02）H42 尺子冻结态闸门 + 冻结内容快照（`dag-scheduler.selftest.sh` A-conc-15，10 项；`check.sh.selftest.sh` C18…C21，4 项） | S | 无 |
 > `01-SPEC-0.9.md` 条目，否则不合入。
 
 ### H 组附：短板总登记表（三处来源合并，一条不漏）

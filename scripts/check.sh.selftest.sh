@@ -200,6 +200,38 @@ else
   bad 15 "分批冻结路径不通：rc=$rc manifest=$([ -f "$CH/MANIFEST.sha256" ] && echo 有 || echo 无)"
 fi
 
+# C18 冻结内容快照落盘（H42：只存哈希证明不了「只更严」，必须能逐行对账）
+if [ -f "$AP/frozen-checks.tar" ] && tar -tf "$AP/frozen-checks.tar" 2>/dev/null | grep -q '^\./run\.sh$'; then
+  ok 18 "freeze 同时存下内容快照 frozen-checks.tar，且含判定文件"
+else
+  bad 18 "冻结内容快照缺失或不含 run.sh"
+fi
+
+# C19 快照不进 checks/（否则会自己触发漂移），且 MANIFEST 里没有它
+if [ ! -e "$CH/frozen-checks.tar" ] && ! grep -q 'frozen-checks' "$CH/MANIFEST.sha256"; then
+  ok 19 "快照落在 .autopilot/ 下且不进哈希范围（不会自己触发漂移）"
+else
+  bad 19 "快照位置不对：混进了冻结范围"
+fi
+
+# C20 漂移时 verify 直接给出逐行对账命令（让「尺子有没有被放宽」变成可查事实）
+cp "$CH/run.sh" "$AP/run.sh.bak"
+printf '# tampered again\n' >> "$CH/run.sh"
+rc=0; out=$(sh "$CHECK" verify "$REPO" 2>&1) || rc=$?
+if [ "$rc" -eq 4 ] && printf '%s\n' "$out" | grep -q 'diff -u' && printf '%s\n' "$out" | grep -q 'run.sh'; then
+  ok 20 "漂移输出附带可执行的 diff -u 对账命令，并点名漂移文件"
+else
+  bad 20 "漂移没给出对账命令：rc=$rc"
+fi
+
+# C21 快照里的内容确实等于冻结态（用它还原即可复绿）
+cp "$AP/run.sh.bak" "$CH/run.sh"
+if sh "$CHECK" verify "$REPO" >/dev/null 2>&1; then
+  ok 21 "还原后 verify 复绿（快照与盘上内容同源，可作恢复依据）"
+else
+  bad 21 "还原后 verify 仍红，快照与哈希不同源"
+fi
+
 echo "SELFTEST: $PASS 通过 / $FAIL 失败"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

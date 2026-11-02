@@ -24,6 +24,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || SCRIPT_DI
 AP="$root/.autopilot"
 CH="$AP/checks"
 MANIFEST="$CH/MANIFEST.sha256"
+FROZEN_TAR="$AP/frozen-checks.tar"
 LOCK="$AP/locks/run.lock"
 LOCK_TIMEOUT="${AUTOPILOT_LOCK_TIMEOUT:-120}"
 
@@ -76,8 +77,42 @@ verify_frozen() {
     echo "验收脚本被改动（MANIFEST 漂移）。拒绝运行。" >&2
     echo "漂移详情:" >&2
     ( cd "$CH" && shasum -a 256 -c MANIFEST.sha256 2>&1 | grep -v ': OK$' >&2 ) || true
+    if [ -f "$FROZEN_TAR" ]; then
+      d=$(mktemp -d 2>/dev/null || echo "")
+      if [ -n "$d" ] && tar -xf "$FROZEN_TAR" -C "$d" 2>/dev/null; then
+        echo "尺子完整性对账（冻结态内容已存快照，可直接逐行 diff 证明是否只更严）:" >&2
+        for f in $(cd "$CH" && shasum -a 256 -c "$MANIFEST" 2>&1 | grep ': FAILED$' | cut -d: -f1); do
+          echo "  diff -u \"$d/${f#./}\" \"$CH/${f#./}\"" >&2
+        done
+      fi
+      [ -n "$d" ] && rm -rf "$d" 2>/dev/null || :
+    else
+      echo "提示: 本次冻结没有内容快照（$FROZEN_TAR 不在），漂移只能证明「变了」，证明不了「只更严」。" >&2
+    fi
     return 4
   fi
+  return 0
+}
+
+# 冻结内容快照。只存哈希是不够的：ContraRunner r-02 实测「冻结后 checks/ 被改但没重冻」，
+# 而「尺子有没有被放宽」这个问题只能靠逐行 diff 回答 —— 没有快照就只能拿更老的 epoch 归档比，
+# 那已经不是冻结态了。快照落在 .autopilot/ 下（不进 checks/，永远不会自己触发漂移）。
+snapshot_frozen() {
+  tmp="$AP/frozen-checks.tar.tmp.$$"
+  rm -rf "$AP/frozen-checks.tar" 2>/dev/null || :
+  if ! ( cd "$CH" && find . -type f \
+        ! -name 'MANIFEST.sha256' \
+        ! -name 'last.log' \
+        ! -name 'last-result.json' \
+        ! -name '.DS_Store' \
+        ! -name 'frozen-checks.tar*' \
+        | LC_ALL=C sort | tar -cf "$tmp" -T - ) 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || :
+    echo "警告: 冻结内容快照失败（$FROZEN_TAR 未更新）。哈希仍然有效，但漂移后无法逐行对账。" >&2
+    return 1
+  fi
+  mv -f "$tmp" "$FROZEN_TAR" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  echo "内容快照: $FROZEN_TAR（$(tar -tf "$FROZEN_TAR" 2>/dev/null | grep -c . | tr -d ' ') 个文件）"
   return 0
 }
 
@@ -108,6 +143,7 @@ case "$cmd" in
     if [ -f "$SCRIPT_DIR/environ.py" ] \
        && python3 "$SCRIPT_DIR/environ.py" freeze --repo "$root" >/dev/null 2>&1; then
       echo "已冻结 $(wc -l < "$MANIFEST" | tr -d ' ') 个文件"
+      snapshot_frozen || :
       exit $E_OK
     fi
     if [ -f "$SCRIPT_DIR/environ.py" ]; then
@@ -118,8 +154,10 @@ case "$cmd" in
         ! -name 'last.log' \
         ! -name 'last-result.json' \
         ! -name '.DS_Store' \
+        ! -name 'frozen-checks.tar*' \
         -exec shasum -a 256 {} + | LC_ALL=C sort > MANIFEST.sha256 )
     echo "已冻结 $(wc -l < "$MANIFEST" | tr -d ' ') 个文件"
+    snapshot_frozen || :
     ;;
 
   verify)
