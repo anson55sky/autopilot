@@ -313,7 +313,31 @@ def apply_proposal(repo, payload, old_epoch):
     except OSError as e:
         print(f"MERGE ARCHIVE {E_ARCHIVE} 写 tasks.json 失败: {e}")
         return E_ARCHIVE
+    sync_goal_epoch_line(repo, old_epoch + 1)
     return E_OK
+
+
+# GOAL.md 抬头那行「契约 epoch：N」是给人和验证者读的真源声明。
+# ContraRunner 实测踩坑：merge 只加 tasks.json 的 epoch，声明行留在旧值，两处差 1，
+# 于是"跨 epoch 的历史绿不并入当轮结论"这条规则失去可核对的锚点。合并动作必须把它一起推进。
+def sync_goal_epoch_line(repo, new_epoch):
+    goal = os.path.join(ap_paths(repo)["ap"], "GOAL.md")
+    try:
+        with open(goal, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return
+    pat = re.compile(r"^(\s*-\s*契约 epoch[：:]\s*)(\d+)(.*)$", re.M)
+    if not pat.search(text):
+        print("MERGE WARN GOAL.md 没有「契约 epoch：N」声明行，未同步（下次 validate 也查不出漂移）")
+        return
+    new = pat.sub(lambda m: "%s%d%s" % (m.group(1), new_epoch, m.group(3)), text, count=1)
+    if new != text:
+        try:
+            with open(goal, "w", encoding="utf-8") as fh:
+                fh.write(new)
+        except OSError as e:
+            print(f"MERGE WARN 同步 GOAL epoch 声明行失败: {e}")
 
 
 def refreeze_manifest(repo):

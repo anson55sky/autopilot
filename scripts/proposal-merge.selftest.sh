@@ -19,7 +19,7 @@ PROP="$TMP/sandbox/proposals"
 mkdir -p "$CH" "$AP/rounds" "$PROP" "$TMP/src"
 
 # --- 初始 epoch 0 契约 ---
-printf '# GOAL\n\n冻结目标：跑通示例。\n' > "$AP/GOAL.md"
+printf '# GOAL\n\n- 契约 epoch：0\n\n冻结目标：跑通示例。\n' > "$AP/GOAL.md"
 cat > "$AP/tasks.json" <<'EOF'
 {"epoch": 0, "tasks": [
   {"id":"T-01","title":"x","role":"Builder","status":"pending","deps":[],
@@ -167,6 +167,20 @@ if [ -f "$CL" ] && [ "$rows" = "3" ] && grep -q 'CP-relax-ok' "$CL"; then
 else
   idx=$((idx + 1)); fails=$((fails + 1))
   printf 'RESULT P%s FAIL changelog 行数=%s（期望 3）或缺 CP-relax-ok\n' "$idx" "$rows"
+fi
+
+# P13 GOAL 的「契约 epoch：N」声明行必须随合并同步推进
+#      （ContraRunner 实测：merge 只加 tasks.json 的 epoch，声明行留在旧值，两处差 1，
+#       于是「跨 epoch 的历史绿不并入当轮结论」这条规则失去可核对的锚点）
+ACT_EPOCH=$(grep -oE '契约 epoch：[0-9]+' "$AP/GOAL.md" | grep -oE '[0-9]+')
+ARCH_EPOCH=$(grep -oE '契约 epoch：[0-9]+' "$AP/baseline/epoch-0/GOAL.md" | grep -oE '[0-9]+' || echo missing)
+TASKS_EPOCH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["epoch"])' "$AP/tasks.json")
+idx=$((idx + 1))
+if [ "$ACT_EPOCH" = "3" ] && [ "$TASKS_EPOCH" = "3" ] && [ "$ARCH_EPOCH" = "0" ]; then
+  printf 'RESULT P%s PASS 合并后活 GOAL 声明行同步到 3（与 tasks.json 一致），归档仍是合并前的 0\n' "$idx"
+else
+  printf 'RESULT P%s FAIL GOAL 声明行未同步：active=%s tasks=%s archive0=%s\n' "$idx" "$ACT_EPOCH" "$TASKS_EPOCH" "$ARCH_EPOCH"
+  fails=$((fails + 1))
 fi
 
 printf '自检 %d 例，失败 %d\n' "$idx" "$fails"
