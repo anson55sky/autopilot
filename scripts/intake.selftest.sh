@@ -293,6 +293,75 @@ else
   fail 15 "接续包没接上 lite：$(printf '%s\n' "$out" | grep -c '档位') / 关闭态 $(printf '%s\n' "$out_off" | grep -c '档位')"
 fi
 
+# A-in-16 行为空槽闸门（H43：lite 不许拿存在性检查冒充「行为已测」）
+BG="$TMP/bg"; mk_plain "$BG"
+BGG="给 main.py 加命令行参数 --name，传了就打印 hello <name>"
+bash "$SKILL/scripts/init.sh" --goal "$BGG" --repo "$BG" --host generic-cli >"$TMP/bg-init.log" 2>&1 || true
+python3 "$IN" draft --repo "$BG" --goal "$BGG" >"$TMP/bg.log" 2>&1
+# ① 起草必须开出行为空槽（TODO→SKIP），并在输出里点名
+if grep -q '行为空槽' "$TMP/bg.log" \
+   && grep -qE '^check "A[0-9]+" "行为验收：[^"]*" TODO' "$BG/.autopilot/checks/run.sh"; then
+  pass 16 "行为型目标自动开出空槽（TODO→SKIP），起草输出点名"
+else
+  fail 16 "没开出行为空槽：$(cat "$TMP/bg.log")"
+fi
+# ② 空槽未填 → 复核必须拒绝（lite 只剩这一个假绿入口）
+python3 "$IN" check --repo "$BG" >/dev/null 2>&1; rc16=$?
+if [ "$rc16" -eq 24 ]; then pass 16 "空槽未填时 check 拒绝（退 24）"; else fail 16 "空槽未填却放行：rc=$rc16"; fi
+# ③ 空话理由挡不住
+python3 "$IN" check --repo "$BG" --accept-untested "太短" >/dev/null 2>&1; rc16=$?
+if [ "$rc16" -eq 24 ]; then pass 16 "不足 20 字的「不测」理由被拒"; else fail 16 "空话理由却放行：rc=$rc16"; fi
+# ④ 人工确认不测 → 放行，理由与条目落进 intake.json，且明写仍判 SKIP
+LONG16="这是自测工作区，行为断言由人工另行验收，本轮不纳入机器判定"
+python3 "$IN" check --repo "$BG" --accept-untested "$LONG16" >"$TMP/bg2.log" 2>&1; rc16=$?
+if [ "$rc16" -eq 0 ] && grep -q '仍判 SKIP' "$TMP/bg2.log" \
+   && python3 - "$BG/.autopilot/intake.json" "$LONG16" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+u = d.get("untested_accepted") or {}
+sys.exit(0 if u.get("reason") == sys.argv[2] and u.get("slots") and u.get("by") == "human" else 1)
+PY
+then pass 16 "经人工确认可放行，理由落 intake.json，且明写这些条目仍判 SKIP"
+else fail 16 "确认不测的留痕不对：rc=$rc16 $(cat "$TMP/bg2.log")"; fi
+# ⑤ 填入真判据后无需理由即放行（正路）
+BF="$TMP/bf"; mk_plain "$BF"
+bash "$SKILL/scripts/init.sh" --goal "$BGG" --repo "$BF" --host generic-cli >"$TMP/bf-init.log" 2>&1 || true
+python3 "$IN" draft --repo "$BF" --goal "$BGG" >/dev/null 2>&1
+python3 - "$BF/.autopilot/checks/run.sh" >"$TMP/bf-sub.log" 2>&1 <<'PY'
+import io, re, sys
+p = sys.argv[1]
+s = io.open(p, encoding="utf-8").read()
+s, n = re.subn(r'^check "(A[0-9]+)" "行为验收：[^"]*" TODO',
+               r'check "\1" "传 --name 打印 hello Bot" sh -c "true"',
+               s, count=1, flags=re.M)
+if n == 1:
+    io.open(p, "w", encoding="utf-8").write(s)   # 没写回等于没填：这里必须真落盘
+print("n=%d" % n)
+sys.exit(0 if n == 1 else 1)
+PY
+rc16=$?
+if [ "$rc16" -ne 0 ]; then
+  fail 16 "填充真判据这步没找到空槽行，无法测正路：$(cat "$TMP/bf-sub.log")"
+else
+  python3 "$IN" check --repo "$BF" >"$TMP/bf.log" 2>&1; rc16=$?
+  if [ "$rc16" -eq 0 ] && grep -q '已由控制器填入真判据' "$TMP/bf.log"; then
+    pass 16 "空槽填入「真跑一遍」的命令并落盘后，无需理由即放行"
+  else
+    fail 16 "填了真判据仍被拒：rc=$rc16 $(cat "$TMP/bf.log")"
+  fi
+fi
+# ⑥ 原话没有行为动词时不得乱开空槽（误拦会让普通小任务全卡住）
+BN="$TMP/bn"; mkdir -p "$BN"; printf '# t\n' > "$BN/notes.md"
+BNG="把 notes.md 的标题层级改对"
+bash "$SKILL/scripts/init.sh" --goal "$BNG" --repo "$BN" --host generic-cli >"$TMP/bn-init.log" 2>&1 || true
+python3 "$IN" draft --repo "$BN" --goal "$BNG" >"$TMP/bn.log" 2>&1
+python3 "$IN" check --repo "$BN" >/dev/null 2>&1; rc16=$?
+if ! grep -qE '行为空槽 [1-9]' "$TMP/bn.log" && [ "$rc16" -eq 0 ]; then
+  pass 16 "原话无行为动词时不开空槽、不误拦复核"
+else
+  fail 16 "非行为型目标被误开空槽：rc=$rc16 $(cat "$TMP/bn.log")"
+fi
+
 if [ "$FAILED" -gt 0 ]; then
   printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"
   exit 1

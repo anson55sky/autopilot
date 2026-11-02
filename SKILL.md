@@ -374,6 +374,7 @@ python3 $SKILL/tools/dashboard.py render --repo $REPO                      # H15
 | 轮次报告凑数（H12） | `tasks_closed` 与 `tasks.json` 对不上，返工率与零进展判定失真 | `close-round` 会拒（退 24）：要么按事实改报告，要么按报告补 `status.py task set` |
 | 把判定文件当普通源码派给工人（H40） | 被考核的人手里握着考卷：把 FAIL 改成 SKIP 在结构上无人可拦 | 新增判定源（checks/ 下还没有的文件）可派工；改既有判定文件必须 `start --allow-checks-edit --note <理由>`，文件清单与理由进 worker 账本事件 |
 | 在尺子已漂移/未登记的冻结面上继续派工与收轮（H42） | RESULT 行不受冻结保护，红绿无法归因是产品变了还是考卷变了；未登记文件对 `shasum -c` 永远绿，属静默失效 | 先 `check.sh verify`；红了就走 inbox 请人重冻或回退，确需带病派工才 `--allow-ruler-drift --note`，且不得据此收轮 |
+| lite 契约拿 `test -s` 这类存在性检查冒充「行为已测」（H43） | 非程序员会拿到一份全绿但根本没测真正需求的契约 —— 这是 lite 唯一的假绿入口 | 行为空槽留在 run.sh 走 SKIP；`check.sh freeze` 在空槽未填时退 24 零写盘；确实不测要 `intake.py check --accept-untested "<≥20 字理由>"`，条目仍判 SKIP |
 | 非幂等卡直接重派（H25） | 重复迁移 / 重复写外部状态，后果不可逆 | 卡上标 `idempotent: false`；重派必须 `start --allow-non-idempotent --note <理由>`，理由进账本 |
 | lite 把自动起草的矩阵当用户已经批准的口径（H39） | 判定标准是机器猜的，却以「你要的做完了」交付 | `intake.json.needs_human_confirm` 逐条转给人；`intake.py brief` 的第一行必须是那句「觉得不对你说」；0 条真 PASS 时 `check.sh run` 退 1，结论页只许写「未完成」 |
 | 契约写了 47 条、checks 只声明 17 条就冻结（H38） | 缺口被冻进 MANIFEST，一路带到报告都没人红 | `check.sh freeze` 会拒（退 24）；确需分批冻结用 `status.py coverage --allow-partial`，理由进账本并在 REPORT 声明 |

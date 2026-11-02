@@ -138,6 +138,16 @@ case "$cmd" in
           exit 24; }
       fi
     fi
+    # H43 lite 行为空槽闸门：lite 起草的契约里，行为要求若还是空槽（TODO），
+    # 说明这份契约只有存在性检查能给出绿 —— 那正是 lite 档唯一的假绿入口。
+    # 装在 freeze 上而不是只留给 `intake.py check`，否则它又变成一个只写在文档里的软约束。
+    if [ -f "$AP/intake.json" ] && [ -f "$SCRIPT_DIR/intake.py" ]; then
+      python3 "$SCRIPT_DIR/intake.py" check --repo "$root" || {
+        echo "冻结被拒：lite 契约的行为验收还有空槽，或复核不通过（见上面的填法）。" >&2
+        echo '确实决定不测这几条，就把理由交给 intake.py：' >&2
+        echo "  python3 $SCRIPT_DIR/intake.py check --repo $root --accept-untested \"<为什么不测也能交付>\"" >&2
+        exit 24; }
+    fi
     # 复用 environ.py 的 freeze（探测哈希实现，MANIFEST 字节格式与 0.8 一致）；
     # environ.py 不在时回退内建 shasum 管线（即 0.8 原样）。
     if [ -f "$SCRIPT_DIR/environ.py" ] \

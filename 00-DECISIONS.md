@@ -456,6 +456,39 @@
   BUSY 时**不**给解锁命令（不引诱宿主抢锁）。
   证据：`scripts/trigger.selftest.sh` A-tr-01…15（16 项：关闭态、锁、上限、待批优先、阶段停止、
   零活动解锁、有活动不抢（含超 TTL 也不抢）、TTL 零活动解锁、decide 两面、claim 与 release 同判据）
+- **H43 lite 行为空槽闸门（已实现，使用者追问「技能能正常用了吗」时查出来的）。**
+  我用真实临时仓把 lite 全链路走了一遍，发现 lite 起草的契约里，一句含行为需求的原话
+  （"给 app.py 加 --name，传了就打印 hello <name>"）只会得到 `test -s app.py` —— **存在性检查冒充行为已测**。
+  这是 lite 面向非程序员时唯一的假绿入口，而且 `judge_kind` 一分类就机检得出来。
+  做法不是让 Python 假装读懂需求（它推不出预期输出），而是：
+  ① `judge_kind()` 把判据分 existence / behavioral（`test -s`、`ls`、`cat` 这类永远算 existence）；
+  ② 原话含行为动词而所有判据都只是存在性时，`behavior_gap()` 开**行为空槽**（`kind=behavior`、judge 为空）
+     → 在 run.sh 里走既有的 `TODO` → `SKIP 待人工确认`，**绝不给 PASS**，也不拿存在性检查顶替；
+  ③ `intake.py check` 拒绝在空槽未填时通过（退 24），填法示例直接印出「真跑一遍并断言输出」的命令；
+     确实决定不测才用 `--accept-untested "<≥20 字理由>"`，理由与条目落进 `intake.json` 的
+     `untested_accepted`（谁决定的、凭什么），并明写这些条目**仍判 SKIP**；
+  ④ 闸门装在 `check.sh freeze` 上（不只是留给 `intake.py check`）—— 否则它又是我在 H40 里批评过的
+     「只写在文档里的软约束」。实测：空槽未填时 freeze 退 **24 且零写盘**（不生成 MANIFEST）。
+  只对 lite 工作区生效（判据是 `.autopilot/intake.json` 存在），ContraRunner / WavePeek 这类标准档不受影响。
+  证据：`scripts/intake.selftest.sh` A-in-16（6 项：自动开槽并点名、未填拒绝、短理由被拒、
+  长理由放行且落 intake.json 仍写 SKIP、填入真判据后无需理由放行、原话无行为动词不误开槽）；
+  另修掉一处**我自己写的测试 bug**：那条正路用例最初只 re.subn 没写回文件，等于没填 —— 断言因此假失败。
+- **H43 lite 行为空槽闸门（已实现；使用者追问「技能能正常用了吗」时实测出来的）。**
+  我用真实临时仓把 lite 全链路走了一遍，发现一句含行为需求的原话（"给 app.py 加 --name，
+  传了就打印 hello <name>"）在 lite 契约里只会得到 `test -s app.py` —— **存在性检查冒充行为已测**。
+  这是 lite 面向非程序员时唯一的假绿入口。做法不是让 Python 假装读懂需求（它推不出预期输出），而是：
+  ① `judge_kind()` 把判据分 existence / behavioral（`test -s`、`ls`、`cat` 一类永远算 existence）；
+  ② 原话含行为动词而所有判据都只是存在性时，`behavior_gap()` 开**行为空槽**（judge 为空）
+     → 在 run.sh 里走既有的 `TODO` → `SKIP 待人工确认`，**绝不给 PASS**，也不拿存在性检查顶替；
+  ③ `intake.py check` 在空槽未填时拒绝（退 24），并直接印出「真跑一遍并断言输出」的填法示例；
+     确实决定不测才用 `--accept-untested "<≥20 字理由>"`，理由与条目落进 `intake.json` 的
+     `untested_accepted`（谁决定的、凭什么），且明写这些条目**仍判 SKIP**；
+  ④ 闸门装在 `check.sh freeze` 上，而不只是留给 `intake.py check`——否则它又变成我在 H40 里
+     批评过的「只写在文档里的软约束」。真仓实测：空槽未填时 freeze 退 **24 且零写盘**（不生成 MANIFEST）。
+  只对 lite 工作区生效（判据是 `.autopilot/intake.json` 是否存在），ContraRunner / WavePeek 标准档不受影响。
+  证据：`scripts/intake.selftest.sh` A-in-16（6 项：自动开槽并点名、未填拒绝、短理由被拒、长理由放行
+  且落 intake.json 仍写 SKIP、填入真判据后无需理由放行、原话无行为动词不误开槽）。
+  另修掉一处**我自己写的测试 bug**：正路那条最初只 `re.subn` 没写回文件，等于没填，导致断言假失败。
 - **H42 尺子冻结态闸门 + 冻结内容快照（已实现，ContraRunner r-02 由两名独立验证员分别踩出、我独立复现）。**
   19:44 重冻之后，我仍然派了写 `checks/probe-*.html` 的卡（T-13/T-23）且没随步重冻 —— 于是
   「18 条从 FAIL 转 PASS」这件事在盘上**无法归因**：到底是产品交付了，还是考卷被改了。
@@ -608,6 +641,7 @@
 > 本组不产生任何 A#、不改变判定。表中每一项在实现时必须**自带关闭态逐字节等价测试**并补
 | 21 | ✅ 已完成（2026-11-01）H41 未接键报告 UNWIRED（`status.selftest.sh` 例 16，2 项） | S | 无 |
 | 22 | ✅ 已完成（2026-11-02）H42 尺子冻结态闸门 + 冻结内容快照（`dag-scheduler.selftest.sh` A-conc-15，10 项；`check.sh.selftest.sh` C18…C21，4 项） | S | 无 |
+| 23 | ✅ 已完成（2026-11-02）H43 lite 行为空槽闸门（`intake.selftest.sh` A-in-16，6 项；freeze 实测退 24 零写盘） | S | 无 |
 > `01-SPEC-0.9.md` 条目，否则不合入。
 
 ### H 组附：短板总登记表（三处来源合并，一条不漏）

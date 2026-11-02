@@ -24,6 +24,7 @@
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -36,6 +37,16 @@ SHAPES = (
 )
 DEFAULT_PRESET = {"bugfix": "quickfix", "refactor": "longrun", "build": "feature", "feature": "feature"}
 ARTIFACT_RE = re.compile(r"([\w./-]+\.(?:html|py|js|ts|md|json|sh|swift|app|zip))")
+# 行为动词：出现即说明用户要的是「跑起来有个可观察结果」，不是「文件存在」。
+# 这些词不试图理解需求，只用来判断「存在性检查够不够」——够用就不开空槽，不够就明写没测。
+BEHAVIOR_RE = re.compile(
+    r"(打印|输出|返回|显示|展示|生成|保存|存储|加载|读取|恢复|播放|停止|计算|换算|统计|排序|过滤|"
+    r"搜索|查找|校验|验证|转换|转成|发送|接收|上传|下载|同步|提醒|通知|支持|响应|跳转|弹出|更新|"
+    r"print|output|returns?|display|show|generate|save|load|play|compute|convert|search|validate|send)",
+    re.I)
+# 纯存在性判据：这些永远不能算作覆盖了行为需求。
+EXISTENCE_ONLY_RE = re.compile(
+    r"^(test\s+-[sfedx]\b|\[\s+-[sfedx]\b|ls\b|stat\b|wc\s+-c\b|cat\b|basename\b|dirname\b|find\b)")
 MATRIX_HEADER = "| ID | 验收项 | 检查方式 | 阈值 | 结果 |"
 DISCLAIMER = "我按下面这些标准判的，觉得不对你说。"
 INTAKE_MARK = "# 由 intake.py 自动起草"
@@ -140,6 +151,29 @@ def resolve_artifact(root, art):
     return hits[0] if len(hits) == 1 else art
 
 
+def judge_kind(cmd):
+    """把判据分成 existence（只看文件在不在）与 behavioral（真跑一遍看结果）。
+
+    存在性判据永远覆盖不了行为需求 —— 这是 lite 档唯一的假绿入口，必须机检出来。
+    """
+    c = (cmd or "").strip()
+    if not c:
+        return "none"
+    return "existence" if EXISTENCE_ONLY_RE.match(c) else "behavioral"
+
+
+def behavior_gap(goal, rows, root=""):
+    """目标里含行为动词，但每条判据都只是存在性/空 —— 返回需要「行为空槽」的交付物列表。
+
+    判据里有真跑起来的命令就认为已被覆盖（哪怕探测的是既有测试），不开空槽，避免误拦。
+    """
+    if not BEHAVIOR_RE.search(goal or ""):
+        return []
+    if any(judge_kind(r.get("judge")) == "behavioral" for r in rows):
+        return []
+    return artifacts_of(goal, root) or ["（原话里没给出文件路径）"]
+
+
 def build_rows(shape, goal, probed, root=""):
     rows = []
     for row in baseline_items(shape):
@@ -150,6 +184,12 @@ def build_rows(shape, goal, probed, root=""):
     for art in artifacts_of(goal, root):
         rows.append({"kind": "user", "text": "交付物 %s 存在且非空" % art,
                      "judge": "test -s %s" % art, "note": "该路径出现在用户原话里"})
+    # 行为需求不硬编一条假绿的判据：开一个 judge 为空的行为空槽，
+    # 走 run.sh 的 TODO → `SKIP 待人工确认`，由控制器/人来填真正的可执行判据。
+    for art in behavior_gap(goal, rows, root):
+        rows.append({"kind": "behavior", "text": "行为验收：运行 %s 后原话要求的结果成立" % art,
+                     "judge": "", "note": "自动起草能看出「要测行为」，但推不出预期输出，"
+                                          "所以开成空槽（SKIP），不用 test -s 的存在性冒充已测"})
     for n, row in enumerate(rows, 1):
         row["a"] = "A%d" % n
     return rows
@@ -305,6 +345,7 @@ def cmd_draft(a):
     probed = probe_repo(root)
     rows = build_rows(shape, a.goal, probed, root)
     confirm = [r["a"] for r in rows if r["kind"] != "user"]
+    slots = [r["a"] for r in rows if r["kind"] == "behavior"]
     arts = artifacts_of(a.goal, root)
 
     declaration = (["## lite 声明（H39，自动起草）",
@@ -314,6 +355,12 @@ def cmd_draft(a):
                     "  `SKIP 待人工确认`，**不会被算成通过**（%d 条待确认：%s）。"
                     % (len(confirm), "、".join(confirm) or "无"),
                     "- 结论页第一行必须写「%s」（`intake.py brief` 已按此排版）。" % DISCLAIMER])
+    if slots:
+        declaration += [
+            "- **行为空槽（%s）**：原话里有可观察的行为要求，但自动起草只能证明「文件存在」，"
+            "证明不了「跑起来结果对」。这些条目已开成空判据（走 SKIP），"
+            "**不许用 `test -s` 之类存在性检查冒充已测**；要它们变绿，得有人把真跑一遍并断言输出的命令填进 run.sh。"
+            % "、".join(slots)]
 
     lines = text.split("\n")
     drop_declare(lines)
@@ -344,16 +391,21 @@ def cmd_draft(a):
            "probed": probed, "artifacts_in_goal": arts,
            "matrix": [{"a": r["a"], "text": r["text"], "judge": r["judge"], "source": r["kind"]} for r in rows],
            "needs_human_confirm": confirm,
+           "behavior_slots": slots,
            "declaration": DECLARATION}
     with open(os.path.join(ap, "intake.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2, sort_keys=True)
         fh.write("\n")
-    print("INTAKE 0 已起草契约：%d 条验收（探测 %d · 原话 %d · 模板 %d），%d 条待人工确认，preset=%s"
+    print("INTAKE 0 已起草契约：%d 条验收（探测 %d · 原话 %d · 模板 %d · 行为空槽 %d），%d 条待人工确认，preset=%s"
           % (len(rows), sum(1 for r in rows if r["kind"] == "probed"),
              sum(1 for r in rows if r["kind"] == "user"),
-             sum(1 for r in rows if r["kind"] == "template"), len(confirm), preset))
+             sum(1 for r in rows if r["kind"] == "template"), len(slots), len(confirm), preset))
     if not probed:
         print("  注意：仓库里一条验证命令都没探测到，全部条目会判 SKIP —— 这不是「做完了」。")
+    if slots:
+        print("  行为空槽 %s：原话要的是「跑起来有个结果」，自动起草开不出判据（它不知道预期输出该是什么）。"
+              % "、".join(slots))
+        print("  控制器必须把每条的空判据换成「真跑一遍并断言输出」的命令，否则 freeze 会被 `intake.py check` 拒绝。")
     print("  下一步：bash {SKILL_ROOT}/scripts/check.sh freeze {REPO_ROOT} && "
           "bash {SKILL_ROOT}/scripts/check.sh run {REPO_ROOT}")
     return 0
@@ -379,7 +431,44 @@ def cmd_check(a):
     if not ids:
         print("INTAKE 24 复核不通过：契约里一条验收项都没有")
         return 24
-    print("INTAKE 0 复核通过：%d 条验收全部有 RESULT 发射位点（SKIP 也算位点，但不会被算成通过）" % len(ids))
+    # 行为空槽没填就不许冻结：lite 的假绿入口只剩这一个 —— 拿 `test -s` 冒充「行为已测」。
+    # 空槽在 run.sh 里长这样：check "A4" "描述（含空格）" TODO  → 判 SKIP；填了才会变成真命令。
+    intake_doc = json.loads(read(os.path.join(ap, "intake.json")) or "{}")
+    reason = (a.accept_untested or "").strip()
+    unfilled = [a_id for a_id in (intake_doc.get("behavior_slots") or []) if a_id in ids]
+    unfilled = [a_id for a_id in unfilled
+                if re.search(r'^\s*check\s+"%s"\s+".*?"\s+TODO\s*$' % re.escape(a_id), runsh, re.M)]
+    if unfilled and not reason:
+        print("INTAKE 24 复核不通过：行为验收仍是空槽（%s）—— 原话要的是可观察结果，"
+              "而现在契约里只有存在性检查能给出绿。" % "、".join(unfilled))
+        print("  填法：把 checks/run.sh 里这些条目的 `TODO` 换成真跑一遍并断言输出的命令，例如")
+        print('    check "A4" "传 --name 打印 hello <name>" sh -c '
+              '"out=$(python3 app.py --name Bot); [ \\"$out\\" = \\"hello Bot\\" ]"')
+        print("  或者确实决定这几条不测（不推荐），带 ≥20 字理由重跑，理由会进契约与账本：")
+        print('    python3 {SKILL_ROOT}/scripts/intake.py check {REPO_ROOT} '
+              '--accept-untested "<为什么不测也能交付>"')
+        return 24
+    if unfilled and len(reason) < 20:
+        print("INTAKE 24 复核不通过：--accept-untested 的理由不足 20 字（空话挡不住闸门）")
+        return 24
+    print("INTAKE 0 复核通过：%d 条验收全部有 RESULT 发射位点（SKIP 也算位点，但不会被算成通过）"
+          % len(ids))
+    if unfilled:
+        print("  行为空槽 %s 经人工确认不测，理由已记入契约与账本：这些条目仍判 SKIP，不算通过。"
+              % "、".join(unfilled))
+    elif intake_doc.get("behavior_slots"):
+        print("  行为空槽 %s 已由控制器填入真判据。" % "、".join(intake_doc["behavior_slots"]))
+    if unfilled:
+        # 只落 intake.json（intake 不依赖 status.py，也不自己写账本；
+        # 「不测」这件事本身就是判定面收窄，必须在契约文件里看得见，而不是只进流水账）
+        intake_doc["untested_accepted"] = {
+            "slots": unfilled, "reason": reason, "by": "human",
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
+        with open(os.path.join(ap, "intake.json"), "w", encoding="utf-8") as fh:
+            json.dump(intake_doc, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+        print("  已记入 intake.json 的 untested_accepted（谁决定的、凭什么）：这些条目仍判 SKIP。")
     return 0
 
 
@@ -441,6 +530,8 @@ def main():
     d.set_defaults(fn=cmd_draft)
     c = sub.add_parser("check")
     c.add_argument("--repo", required=True)
+    c.add_argument("--accept-untested", dest="accept_untested", default="",
+                   help="经人工确认这些行为空槽不测（≥20 字理由，写入 intake.json；条目仍判 SKIP）")
     c.set_defaults(fn=cmd_check)
     b = sub.add_parser("brief")
     b.add_argument("--repo", required=True)

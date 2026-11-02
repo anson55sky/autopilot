@@ -201,6 +201,7 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 
 | H41 | `status.py coverage` 多一档 `UNWIRED`：拿 run.sh 已声明的 `A#:探针键` 映射表去 checks/ 的页面与产物里找那个键，找不到就点名「现在拿不到 PASS，缺的是尺子那一格」；只报告、不改判定、不动退出码（结果仍只认冻结 run.sh 的 RESULT 行） | 提示级（派工前给控制器看，不参与判定） | `status.selftest.sh` 例 16（2 项）+ ContraRunner 实测 14 条未接键 |
 | H42 | 派工前审「尺子还是不是那把被冻住的尺子」：`status.py ruler_audit()` 出三档 `drift`（在册文件哈希与冻结值不符）/ `unregistered`（冻结后新增的判定文件不在 MANIFEST，`shasum -c` 对它永远绿）/ `no_manifest`（有 checks/ 却从未冻结）；`dag_scheduler start` 在任何写动作前拦，退 **24**；放行只认 `--allow-ruler-drift --note <理由>`（无 note 退 2），尺子状态原文落账本 `ruler_drift` 字段。无 checks/ 的串行/早期工作区返回 ok 不误拦。同时 `check.sh freeze` 除哈希外存 `​.autopilot/frozen-checks.tar` 内容快照（在 checks/ 外，永不自己触发漂移），`verify` 检出漂移时打印可执行的 `diff -u` 对账命令并点名文件 —— 只存哈希回答不了「改动是否只更严」 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；H40 管要不要动尺子、H41 管尺子接没接上、H42 管尺子还是不是冻住那把，三道闸门各自独立 | `dag-scheduler.selftest.sh` A-conc-15（10 项）+ `status.selftest.sh` 例 17（6 项，收轮同口径）+ `check.sh.selftest.sh` C18…C21（4 项）+ ContraRunner 实测（rc=4 漂移、probe-editor 未登记、probe-ui 虚拟时间下零上报已复现） |
+| H43 | lite 行为空槽闸门：`intake.py judge_kind()` 分 existence/behavioral，原话含行为动词而判据只有存在性时开**行为空槽**（run.sh 走 TODO→`SKIP 待人工确认`，绝不当 PASS，也不用 `test -s` 顶替）；`intake.py check` 未填即拒（退 24）并印出「真跑并断言输出」的填法；不测须 `--accept-untested "<≥20 字理由>"`，理由与条目落 `intake.json` 的 `untested_accepted`，条目仍判 SKIP；闸门装在 `check.sh freeze` 上而非只留给 check（否则又成文档级软约束） | 脚本级（冻结动作本身）；仅 lite 工作区生效（看 intake.json 在不在），标准档行为不变 | `intake.selftest.sh` A-in-16（6 项）+ 真仓实测 freeze 退 24、MANIFEST 零写盘 |
 ---
 
 ## 3. 新增：预算隔离
