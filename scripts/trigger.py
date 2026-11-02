@@ -45,6 +45,10 @@ try:
     import status as status_mod
 except ImportError:                    # pragma: no cover
     status_mod = None
+try:
+    import inbox as inbox_mod           # 待批项状态的唯一实现（H45：不再自己数事件行）
+except ImportError:                    # pragma: no cover
+    inbox_mod = None
 import goalcfg                          # GOAL 段落解析器唯一实现（H28）
 
 E_OK, E_USAGE = 0, 2
@@ -181,9 +185,33 @@ def count_ready(repo):
 
 
 def open_inbox_count(repo):
-    """待批项数量。数据源与 inbox.py 一致：`.autopilot/inbox.jsonl` 里 state=open 的行。"""
-    p = os.path.join(ap_of(repo), "inbox.jsonl")
-    n = 0
+    """未答复的待批**条目**数。
+
+    原实现是「数 inbox.jsonl 里 state==open 的行」，而 inbox.jsonl 是追加式事件流：
+    一条待批会产生 open / present / answer 多行，且 present、answer 行根本没有 state 字段，
+    于是 `e.get("state") or "open"` 把它们也默认成 open 一起计入 —— 事件当条目数，答复过的也还在数。
+    ContraRunner 实测：真待批 1 条，它报 13 条，decide 因此永久返回 24 ASK-HUMAN，
+    自动接续被一个不存在的数字停摆。改为复用 inbox.py 的按 id 折叠语义（单一实现，H28）。
+    """
+    ap = ap_of(repo)
+    if inbox_mod is not None:
+        try:
+            events = inbox_mod.load_events(ap)
+            # 兼容 0.8 时代与自测里的写法：有的行只有 state、没有 type。
+            # 按 type 折叠会把这类"未答复待批"整个漏掉 —— 那等于把待批闸门改松了，
+            # 违反「判定只更严、不删护栏」。这里先把它们规范成 open 事件再折叠。
+            fixed = []
+            for e in events:
+                if isinstance(e, dict) and not e.get("type") and str(e.get("state") or "open") == "open":
+                    e = dict(e, type="open")
+                fixed.append(e)
+            items = inbox_mod.current_items(fixed)
+            return sum(1 for it in items.values() if it.get("status") != "answered")
+        except Exception:
+            pass
+    # 退路（inbox.py 不可用时）：仍按 id 折叠，绝不按行计数
+    p = os.path.join(ap, "inbox.jsonl")
+    latest = {}
     try:
         with open(p, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -194,11 +222,21 @@ def open_inbox_count(repo):
                     e = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(e, dict) and str(e.get("state") or "open") == "open":
-                    n += 1
+                if not isinstance(e, dict):
+                    continue
+                iid = e.get("id")
+                if not iid:
+                    continue
+                et = e.get("type") or ("open" if str(e.get("state") or "open") == "open" else None)
+                if et == "open":
+                    latest[iid] = "open"
+                elif et == "present" and latest.get(iid) == "open":
+                    latest[iid] = "presented"
+                elif et == "answer" and iid in latest and latest[iid] != "answered":
+                    latest[iid] = "answered"
     except OSError:
         return 0
-    return n
+    return sum(1 for v in latest.values() if v != "answered")
 
 
 def cmd_decide(a):

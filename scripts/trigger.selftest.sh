@@ -258,6 +258,55 @@ else
   fail 15 "陈旧锁改占不通：rc=$rc3 $out3"
 fi
 
+# ---------------------------------------------------------------- 16 待批计数按条目折叠（H45）
+# inbox.jsonl 是追加式事件流：一条待批会产生 open/present/answer 多行，且 present、answer 行
+# 没有 state 字段。旧实现数「state==open 的行」并把缺 state 的也当 open → 一条已答复的待批
+# 会被数成好几条，decide 永久 ASK-HUMAN。ContraRunner 实测真待批 1 条、它报 13 条。
+put_inbox none
+cat > "$REPO/.autopilot/inbox.jsonl" <<'EOF'
+{"id":"I-1","type":"open","kind":"approval","state":"open"}
+{"id":"I-1","type":"present"}
+{"id":"I-1","type":"answer","answered_by":"human","ref":"chat-session:x","answer":"批准"}
+{"id":"I-2","type":"open","kind":"approval","state":"open"}
+{"id":"I-2","type":"present"}
+{"id":"I-3","type":"open","kind":"approval","state":"open"}
+{"id":"I-3","type":"present"}
+{"id":"I-3","type":"answer","answered_by":"human","ref":"chat-session:y","answer":"批准"}
+{"id":"I-4","type":"open","kind":"approval","state":"open"}
+{"id":"I-4","type":"present"}
+{"id":"I-4","type":"answer","answered_by":"supervisor","note":"控制器代判","answer":"批准"}
+EOF
+CNT16=$(python3 -c "
+import sys; sys.path.insert(0, '$HERE')
+import trigger
+print(trigger.open_inbox_count('$REPO'))
+" 2>/dev/null)
+if [ "$CNT16" = "1" ]; then
+    pass 16 "待批计数按 id 折叠：11 个事件行 / 5 条条目里只有 I-2 未答复 → 1（旧实现会数出 8~11）"
+else
+    fail 16 "待批计数不对：得到 $CNT16，期望 1"
+fi
+# 全部答复完 → 必须归零，否则自动接续永久停摆
+put_inbox none
+cat > "$REPO/.autopilot/inbox.jsonl" <<'EOF'
+{"id":"I-1","type":"open","kind":"approval","state":"open"}
+{"id":"I-1","type":"present"}
+{"id":"I-1","type":"answer","answered_by":"human","ref":"chat-session:x","answer":"批准"}
+{"id":"I-2","type":"open","kind":"approval","state":"open"}
+{"id":"I-2","type":"answer","answered_by":"human","ref":"chat-session:z","answer":"批准"}
+EOF
+CNT16B=$(python3 -c "
+import sys; sys.path.insert(0, '$HERE')
+import trigger
+print(trigger.open_inbox_count('$REPO'))
+" 2>/dev/null)
+if [ "$CNT16B" = "0" ]; then
+    pass 16 "全部已答复时计数归零，decide 不再被幽灵待批卡住"
+else
+    fail 16 "已答复的待批仍在计数：得到 $CNT16B，期望 0"
+fi
+put_inbox none
+
 if [ "$FAILED" -gt 0 ]; then
   printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"
   exit 1
