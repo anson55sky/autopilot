@@ -1239,7 +1239,7 @@ def cmd_clock(root, kind, note):
     return 0
 
 
-def cmd_close_round(root, round_path):
+def cmd_close_round(root, round_path, allow_ruler_drift=""):
     ap = os.path.join(root, ".autopilot")
     if not os.path.isdir(ap):
         print("没有 %s（先跑 init.sh）" % ap)
@@ -1252,6 +1252,22 @@ def cmd_close_round(root, round_path):
     if not isinstance(state, dict) or not state:
         print("读不到 %s（先跑 init.sh）" % os.path.join(ap, "state.json"))
         return 2
+
+    # H42：尺子不在冻结态就不许收轮。派工拦住了但收轮不拦，等于允许把「不受冻结保护的红绿」
+    # 固化进 rounds/r-XX.json 与历史结论 —— 那比派错工更糟，因为它看起来是终局证据。
+    rstatus, rlines = ruler_audit(root)
+    if rstatus != "ok" and not (allow_ruler_drift or "").strip():
+        print("收轮被拒：判定面不在冻结态（%s）" % rstatus)
+        for l in rlines:
+            print("  - %s" % l)
+        print("此时 RESULT 行不受冻结保护，收进 rounds/ 就是不可解释的历史证据。")
+        print("正确做法是先修/回退尺子并重冻；确实要带病收轮，才带 ≥20 字理由重跑：")
+        print('  status.py close-round <root> <round.json> '
+              '--allow-ruler-drift "<为什么可以在此刻收>"')
+        return 24
+    if rstatus != "ok" and len((allow_ruler_drift or "").strip()) < 20:
+        print("收轮被拒：--allow-ruler-drift 的理由不足 20 字（空话挡不住闸门）")
+        return 24
 
     round_no = to_int(round_doc.get("round"), 0) or 0
     closed = state.setdefault("closed_rounds", [])
@@ -1497,6 +1513,9 @@ def cmd_close_round(root, round_path):
         # 0.9 新增字段，不改旧字段含义
         "flex": flex_block,
         "closed_at": record["closed_at"],
+        # H42：带病收轮必须能被事后查出来——这轮是在什么尺子状态下、凭什么理由收的
+        "ruler_status": rstatus,
+        "ruler_drift_reason": (allow_ruler_drift or "").strip() if rstatus != "ok" else "",
     }
     if start_dt is not None:
         event["started_at"] = start_dt.astimezone(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -1576,6 +1595,8 @@ def build_parser():
     p_close = sub.add_parser("close-round", help="收轮（可重复执行）")
     p_close.add_argument("root", help="仓库目录")
     p_close.add_argument("round_json", help="轮次结果 JSON")
+    p_close.add_argument("--allow-ruler-drift", dest="allow_ruler_drift", default="",
+                         help="尺子不在冻结态仍要收轮的理由（H42；正常情况应修尺子而不是收轮）")
 
     p_metrics = sub.add_parser("metrics", help="打印某轮指标（0.9 新增）")
     p_metrics.add_argument("root", help="仓库目录")
@@ -1628,7 +1649,8 @@ def dispatch(args):
     if args.cmd == "budget":
         return cmd_budget(os.path.abspath(args.root), list(args.assign or []))
     if args.cmd == "close-round":
-        return cmd_close_round(os.path.abspath(args.root), args.round_json)
+        return cmd_close_round(os.path.abspath(args.root), args.round_json,
+                               getattr(args, "allow_ruler_drift", ""))
     if args.cmd == "metrics":
         return cmd_metrics(os.path.abspath(args.root), args.round)
     if args.cmd == "task":

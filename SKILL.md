@@ -189,6 +189,8 @@ while 未触发停止条件:
 此时跑出来的任何 RESULT 行都不受冻结保护，红绿无法归因到底是产品变了还是考卷变了；
 放行只认 `start --allow-ruler-drift --note <理由>`（无 note 退 2），尺子状态原文落进账本 `ruler_drift` 字段。
 没有 checks/ 的串行/早期工作区返回 ok，这条闸门不误拦。
+同一审计也拦**收轮**：`close-round` 在漂移态退 24 且零写盘 —— 只拦派工不拦收轮，等于允许把不受冻结保护的
+红绿固化进 `rounds/` 当终局证据。带病收轮要 `--allow-ruler-drift "<≥20 字理由>"`，尺子状态与理由一起进 round 账本事件。
 `check.sh freeze` 现在除哈希外还把内容存成 `.autopilot/frozen-checks.tar`（在 checks/ 外，永不自己触发漂移），
 `verify` 检出漂移时直接打印可执行的 `diff -u` 对账命令并点名文件——只存哈希回答不了「这次改动是否只更严」，
 而那正是铁律「判定只更严」唯一可查的形式。

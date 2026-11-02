@@ -816,6 +816,105 @@ EOF
     fi
 # ---------------------------------------------------------------- H41 未接键报告（派工前就知道现在拿不到 PASS）
 
+case_ruler_close_gate() {
+    # H42：尺子不在冻结态就不许收轮（派工拦了收轮不拦 = 允许把不可解释的红绿固化成历史证据）
+    mk_manifest() {
+        $PY - "$1" <<'PY'
+import hashlib, os, sys
+cdir = sys.argv[1]
+rows = []
+for f in sorted(os.listdir(cdir)):
+    p = os.path.join(cdir, f)
+    if not os.path.isfile(p) or f == 'MANIFEST.sha256':
+        continue
+    rows.append("%s  ./%s" % (hashlib.sha256(open(p, "rb").read()).hexdigest(), f))
+open(os.path.join(cdir, "MANIFEST.sha256"), "w", encoding="utf-8").write("\n".join(sorted(rows)) + "\n")
+PY
+    }
+
+    repo=$(new_repo h42a)
+    mkdir -p "$repo/.autopilot/rounds" "$repo/.autopilot/checks"
+    write_state "$repo/.autopilot/state.json" "\"$(now_minus_aware 60)\""
+    mk_tasks "$repo/.autopilot/tasks.json" ', "closed_round": 1' 1
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo/.autopilot/checks/run.sh"
+    mk_manifest "$repo/.autopilot/checks"
+    cat > "$repo/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 1, "notes": "尺子干净"}
+EOF
+
+    # ① 冻结面一致 → 正常收轮
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-01.json" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass 17 "尺子在冻结态时收轮不受影响"
+    else
+        fail 17 "干净尺子却被拒（rc=$rc）：$out"
+    fi
+
+    # ② 篡改在册判定文件 → 收轮退 24 且零写盘
+    repo2=$(new_repo h42b)
+    mkdir -p "$repo2/.autopilot/rounds" "$repo2/.autopilot/checks"
+    write_state "$repo2/.autopilot/state.json" "\"$(now_minus_aware 60)\""
+    mk_tasks "$repo2/.autopilot/tasks.json" ', "closed_round": 1' 1
+    printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo2/.autopilot/checks/run.sh"
+    mk_manifest "$repo2/.autopilot/checks"
+    cat > "$repo2/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 1, "notes": "尺子已漂移"}
+EOF
+    printf 'relaxed\n' >> "$repo2/.autopilot/checks/run.sh"
+    out2=$($PY "$STATUS" close-round "$repo2" "$repo2/.autopilot/rounds/r-01.json" 2>&1); rc2=$?
+    ru2=$($PY -c 'import json,sys;print(json.load(open(sys.argv[1]))["rounds_used"])' \
+        "$repo2/.autopilot/state.json")
+    if [ "$rc2" -eq 24 ] && [ "$ru2" = "0" ] && printf '%s' "$out2" | grep -q "判定面不在冻结态" \
+        && [ ! -f "$repo2/.autopilot/rounds/r-01.metrics.json" ]; then
+        pass 17 "漂移态收轮退 24，理由点名尺子状态，且 state/指标一个字都没写"
+    else
+        fail 17 "漂移态竟收成功（rc=$rc2 rounds_used=$ru2）：$out2"
+    fi
+    if grep -q '"type": "round"' "$repo2/.autopilot/ledger.jsonl" 2>/dev/null; then
+        fail 17 "拒收轮却往账本写了 round 事件"
+    else
+        pass 17 "拒收轮不污染账本"
+    fi
+
+    # ③ 空话理由不放行；≥20 字才放行，且尺子状态与理由都进账本
+    out3=$($PY "$STATUS" close-round "$repo2" "$repo2/.autopilot/rounds/r-01.json" \
+        --allow-ruler-drift "太短" 2>&1); rc3=$?
+    if [ "$rc3" -eq 24 ]; then
+        pass 17 "短理由挡不住闸门"
+    else
+        fail 17 "短理由却放行：rc=$rc3"
+    fi
+    out4=$($PY "$STATUS" close-round "$repo2" "$repo2/.autopilot/rounds/r-01.json" \
+        --allow-ruler-drift "已逐行 diff 确认阈值未放宽，先收下本轮证据，重冻在下一轮前完成" 2>&1); rc4=$?
+    if [ "$rc4" -eq 0 ] && $PY - "$repo2/.autopilot/ledger.jsonl" <<'PY'
+import json, sys
+ev = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+r = [e for e in ev if e.get("type") == "round"]
+sys.exit(0 if len(r) == 1 and r[0].get("ruler_status") == "drift"
+         and "逐行 diff" in (r[0].get("ruler_drift_reason") or "") else 1)
+PY
+    then
+        pass 17 "带长理由可收轮，且 ruler_status 与放行理由都进了账本"
+    else
+        fail 17 "带病收轮的留痕不对（rc=$rc4）：$out4"
+    fi
+
+    # ④ 没有 checks/ 的工作区：不得误拦（串行/早期阶段大量存在）
+    repo3=$(new_repo h42c)
+    mkdir -p "$repo3/.autopilot/rounds"
+    write_state "$repo3/.autopilot/state.json" "\"$(now_minus_aware 60)\""
+    mk_tasks "$repo3/.autopilot/tasks.json" ', "closed_round": 1' 1
+    cat > "$repo3/.autopilot/rounds/r-01.json" <<'EOF'
+{"round": 1, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 1, "notes": "无 checks 的串行流程"}
+EOF
+    out5=$($PY "$STATUS" close-round "$repo3" "$repo3/.autopilot/rounds/r-01.json" 2>&1); rc5=$?
+    if [ "$rc5" -eq 0 ]; then
+        pass 17 "没有判定面的工作区不误拦"
+    else
+        fail 17 "无 checks/ 却被拦（旧工作区会全线卡死）：rc=$rc5 $out5"
+    fi
+}
+
 case_unwired_pairs() {
     r="$TMPROOT/h41"; mkdir -p "$r/.autopilot/checks"
     printf '# GOAL\n\n## 验收矩阵\n\n| A# | 条目 | 判定 |\n| --- | --- | --- |\n| A1 | x | y |\n| A2 | z | w |\n' > "$r/.autopilot/GOAL.md"
@@ -956,6 +1055,8 @@ case_clock_accounting
 case_multibudget
 case_coverage_check
 case_coverage_gate
+case_ruler_close_gate
+case_unwired_pairs
 case_unwired_pairs
 
 if [ "$FAILED" -gt 0 ]; then

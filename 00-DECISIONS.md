@@ -479,10 +479,16 @@
   它和 H40/H41 是三条独立闸门：H40 管「这张卡要不要动尺子」，H41 管「尺子有没有接上」，
   H42 管「尺子现在还是不是那把被冻住的尺子」。 ContraRunner 现状：H42 起效后本仓所有派工被拦，
   第 2 轮只能停在 I-4 等裁 —— 这是设计意图，不是故障。
+  ③ 同一审计也装在**收轮**上（`close-round` 默认拒绝，退 24 且零写盘）：只拦派工不拦收轮，等于
+     允许把「不受冻结保护的红绿」固化进 `rounds/r-XX.json` 当成终局证据 —— 那比派错工更糟。
+     带病收轮需 `--allow-ruler-drift "<≥20 字理由>"`，且 `ruler_status` 与理由一起写进 round 账本事件。
   证据：`scripts/dag-scheduler.selftest.sh` A-conc-15（10 项：干净态不误拦、drift 退 24、理由写明状态、
   无 note 退 2、带 note 放行、进账本且干净态不污染字段、未登记新增文件退 24 且点名、
-  无 checks/ 不误拦、有 checks/ 从未冻结退 24）；`scripts/check.sh.selftest.sh` C18…C21（4 项：
-  快照落盘且含判定文件、快照不进哈希范围、漂移打印 diff 对账命令、还原后复绿证明快照同源）
+  无 checks/ 不误拦、有 checks/ 从未冻结退 24）；`scripts/status.selftest.sh` 例 17（6 项：干净态可收轮、
+  漂移退 24 且 state/指标零写盘、拒收不污染账本、短理由被拒、长理由放行且 ruler_status+理由进账本、
+  无 checks/ 不误拦）；`scripts/check.sh.selftest.sh` C18…C21（4 项：快照落盘且含判定文件、
+  快照不进哈希范围、漂移打印 diff 对账命令、还原后复绿证明快照同源）。
+  ContraRunner 实测：`close-round` 在漂移态退 24，`rounds/` 里没有多出 r-02（零写盘）。
 - **H41 未接键报告（已实现，H40 同一轮里连着踩出来的）。** T-18 派给 `src/render.js` 做 A24/A25，
   工人跑回来说「判据读的是 `createGame()` 上的字段，node 路径根本不加载 render.js」——
   15 分钟和 680 万 token 换一句我派工前就能机检的话。同类错配还有 9 条：A26-A28/A34-A35/A37-A39/A42
