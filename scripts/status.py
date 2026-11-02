@@ -18,7 +18,10 @@
   C4 收轮幂等：close-round 可重复执行，flex 轮次也不会重复计数。
   C5 轮次指标：每次收轮写 rounds/r-XX.metrics.json。
   H12 收轮对账：done 写 closed_round；`tasks_closed` 与记账对不上则退 24 且零写盘。
-  H9 时间账：pause/resume 只用于报告与量化，停止判定仍按墙钟（放宽需人工改 GOAL）。
+  H9 时间账：pause/resume 只用于报告与量化，停止判定默认按墙钟。
+  H46 活动分钟口径：GOAL.md 的 `## BUDGET` 里写 `minute_basis = active` 才改用账本事件
+       折叠出的活动分钟（墙钟照打，两个数都能看到）；没写这段 = 墙钟，输出与旧版逐字一致。
+       口径只能由人工写进 GOAL，`status.py budget` 不开放这个键。
 
 CLI 与 0.8 完全兼容（同样的子命令、同样的参数名），0.9 是它的超集。
 """
@@ -33,6 +36,14 @@ import re
 import shutil
 import sys
 import time
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.append(SCRIPT_DIR)          # 追加而非插到头部：别让本目录里的名字挡住标准库
+try:
+    import goalcfg                      # GOAL 段落解析器唯一实现（H28）
+except Exception:                       # pragma: no cover - 缺文件时按默认口径继续跑
+    goalcfg = None
 
 UNKNOWN = "unknown"
 PHASES = ("intake", "plan", "execute", "verify", "report")
@@ -162,12 +173,101 @@ def elapsed_minutes(stamp):
         return None
 
 
+MIN_IDLE_CAP_MIN = 10          # 折叠上限的下界，见 gap_capped_minutes
+ACTIVE_DEFAULT_CAP_MIN = 45    # H46 默认：单段事件间隔最多算 45 分钟工作
+
+
+def gap_capped_minutes(events, idle_cap_min=ACTIVE_DEFAULT_CAP_MIN):
+    """H46：真实工作分钟 —— 账本相邻事件间隔按 `idle_cap_min` 截断后累加。
+
+    为什么需要它：H9 的 slept_minutes 只认显式 `pause`/`resume` 事件，而无人值守模式下
+    根本没有谁去调 pause（跨会话长跑的常态就是"没人管"）。于是 `max_minutes` 预算实际按
+    墙钟燃烧：ContraRunner 实测 1006/480 分钟、pause 事件 0 条，第二天就无条件触发
+    「时长预算耗尽」，自动接续装死。跨天长跑的定义就决定了它必然撞这个墙。
+
+    口径：两段事件之间隔多久，就认为工作发生了多久，但**单段最多算 idle_cap_min 分钟**——
+    真在干活时事件是分钟级密集的；隔了 10 小时说明没人工作，那 10 小时里最多算 45 分钟
+    属于"产出这两个事件的那个会话还活着"。
+
+    性质：结果恒 ≤ 墙钟，且上限有下界（`MIN_IDLE_CAP_MIN`）兜着——把 cap 调小就等于把
+    "没干活的时间"洗成"没工作"，所以声明值低于 10 分钟一律按 10 分钟算。
+    无事件时返回 None，调用方回落到墙钟，老工作区行为不变。
+    """
+    cap = to_int(idle_cap_min, None)
+    if cap is None:
+        cap = ACTIVE_DEFAULT_CAP_MIN
+    elif cap < MIN_IDLE_CAP_MIN:
+        cap = MIN_IDLE_CAP_MIN
+    stamps = []
+    for e in events or []:
+        if not isinstance(e, dict):
+            continue
+        ts = parse_ts(e.get("ts") or e.get("answered_at") or e.get("closed_at"))
+        if ts is not None:
+            stamps.append(ts)
+    if len(stamps) < 2:
+        return None
+    stamps.sort()
+    cap_seconds = float(cap) * 60.0
+    total = 0.0
+    for a, b in zip(stamps, stamps[1:]):
+        total += min((b - a).total_seconds(), cap_seconds)
+    return int(round(total / 60.0))
+
+
+BUDGET_GOAL_DEFAULTS = {"minute_basis": "wall", "idle_cap_min": ACTIVE_DEFAULT_CAP_MIN}
+
+
+def minute_basis(root, ap, events, started_at=None):
+    """H46：时长预算用哪个口径。返回 dict(basis, used, wall, active, cap, declared, present, note)。
+
+    只认 GOAL.md 的 `## BUDGET` 段，不认 state.budget —— `status.py budget` 是控制器
+    自己写的入口，把口径开放给它等于让控制器放宽自己的停机条件（H9 原话：改口径需人工改
+    GOAL）。没写这段 = `wall`，与 0.9.7 及更早逐字一致。
+
+    basis=active 但账本事件不足 2 条时回落 wall（更严的那个），并把回落原因报出来。
+    """
+    if started_at is None:
+        started_at = _started_at(root, ap)
+    wall = elapsed_minutes(started_at)
+    cfg = dict(BUDGET_GOAL_DEFAULTS, _present=False)
+    if goalcfg is not None:
+        try:
+            cfg.update(goalcfg.parse_block(
+                os.path.join(ap, "GOAL.md"), "BUDGET", BUDGET_GOAL_DEFAULTS))
+        except Exception:                       # pragma: no cover - 解析器永不抛，兜底而已
+            pass
+    declared = str(cfg.get("minute_basis") or "wall").strip().lower()
+    cap = to_int(cfg.get("idle_cap_min"), None)
+    effective_cap = ACTIVE_DEFAULT_CAP_MIN if cap is None else max(cap, MIN_IDLE_CAP_MIN)
+    active = gap_capped_minutes(events, effective_cap)
+    out = {"basis": declared if declared in ("wall", "active") else "wall",
+           "wall": wall, "active": active, "cap": effective_cap,
+           "declared": declared, "present": bool(cfg.get("_present")), "note": ""}
+    if declared not in ("wall", "active"):
+        out["note"] = "GOAL 的 minute_basis=%s 不是 wall/active，按墙钟算" % declared
+    elif declared == "active" and active is None:
+        out["basis"] = "wall"
+        out["note"] = "GOAL 声明按活动分钟，但账本事件不足 2 条，回落墙钟"
+    elif declared == "active" and cap is not None and cap < MIN_IDLE_CAP_MIN:
+        out["note"] = "GOAL 的 idle_cap_min=%s 低于下界，已按 %s 分钟算" % (cap, MIN_IDLE_CAP_MIN)
+    out["used"] = active if out["basis"] == "active" else wall
+    return out
+
+
+def _started_at(root, ap):
+    state = load_json(os.path.join(ap, "state.json"), {})
+    if not isinstance(state, dict):
+        state = {}
+    return state.get("started_at")
+
+
 def slept_minutes(events):
     """H9：`pause`/`resume` 记账出来的"墙钟在走但没干活"分钟数。
 
     没有这两类事件时返回 None —— 老工作区的口径与输出一个字都不变。
-    **停止判定仍然按墙钟**：本数字只用于报告和量化，要把判定改成活跃时长必须人工改 GOAL，
-    不允许控制器自己放宽（只准收紧或持平）。
+    **停止判定默认仍按墙钟**：本数字只用于报告和量化。要改成"活动时长"必须人工在 GOAL
+    写 `## BUDGET` 的 `minute_basis = active`（H46），不允许控制器自己放宽。
     """
     total = 0.0
     open_from = None
@@ -695,6 +795,9 @@ def cmd_summary(root):
     started_text = fmt_started(state.get("started_at"))
     elapsed = elapsed_minutes(state.get("started_at"))
     events = read_ledger(ap)
+    # H46：时长预算口径。GOAL 没有 `## BUDGET` 段时 basis=wall，输出与 0.9.7 逐字一致。
+    tb = minute_basis(root, ap, events, started_at=state.get("started_at"))
+    used_minutes = elapsed if tb["used"] is None else tb["used"]
     calls = sum(1 for e in events if e.get("type") in ("worker", "verifier"))
 
     tasks = load_tasks(ap)
@@ -756,8 +859,9 @@ def cmd_summary(root):
         stops.append("连续两轮零进展")
     if max_rounds and rounds >= max_rounds:
         stops.append("轮次预算耗尽")
-    if max_minutes and elapsed is not None and elapsed >= max_minutes:
-        stops.append("时长预算耗尽")
+    if max_minutes and used_minutes is not None and used_minutes >= max_minutes:
+        stops.append("时长预算耗尽" if tb["basis"] == "wall"
+                     else "时长预算耗尽（按活动分钟，H46）")
     if max_calls and calls >= max_calls:
         stops.append("调用预算耗尽")
     if max_tool_calls and tool_calls >= max_tool_calls:
@@ -783,12 +887,23 @@ def cmd_summary(root):
     print("模式:   %s   阶段: %s" % (state.get("mode", "auto"), state.get("phase", "intake")))
     print("开始:   %s" % started_text)
     print("轮次:   %s/%s   用时: %s/%s 分钟   调用: %s/%s"
-          % (rounds, max_rounds or "-", fmt_num(elapsed), max_minutes or "-",
+          % (rounds, max_rounds or "-", fmt_num(used_minutes), max_minutes or "-",
              calls, max_calls or "-"))
+    if tb["basis"] == "active" or tb["note"]:
+        # H46：只有口径真的不是默认的墙钟、或声明被下界/回落改写过，才多打这行。
+        # 显式写 minute_basis = wall 的工作区与「没写这段」一样，输出逐字节不变。
+        basis_cn = "活动分钟" if tb["basis"] == "active" else "墙钟"
+        print("预算口径: 时长按%s计 %s/%s（墙钟 %s · 活动 %s · 单段事件间隔上限 %s 分钟，H46）"
+              % (basis_cn, fmt_num(used_minutes), max_minutes or "-",
+                 fmt_num(tb["wall"]), fmt_num(tb["active"]), tb["cap"]))
+        if tb["note"]:
+            print("口径说明: %s" % tb["note"])
     slept = slept_minutes(events)
     if slept is not None and elapsed is not None:
-        print("时间账:  墙钟 %s 分钟 = 活跃 %s + 暂停/休眠 %s（H9；停止判定仍按墙钟，改口径需人工改 GOAL）"
-              % (elapsed, elapsed - slept, slept))
+        tail = ("停止判定按活动分钟，见 GOAL 的 ## BUDGET" if tb["basis"] == "active"
+                else "停止判定仍按墙钟，改口径需人工改 GOAL")
+        print("时间账:  墙钟 %s 分钟 = 活跃 %s + 暂停/休眠 %s（H9；%s）"
+              % (elapsed, elapsed - slept, slept, tail))
     if max_tool_calls or max_usd:
         parts = []
         if max_tool_calls:

@@ -1,5 +1,5 @@
 #!/bin/sh
-# status.py 自检：C3 时间戳健壮 / C4 收轮幂等 / C5 轮次指标 / H12 收轮对账 / H9 时间账
+# status.py 自检：C3 时间戳健壮 / C4 收轮幂等 / C5 轮次指标 / H12 收轮对账 / H9 时间账 / H46 活动分钟口径
 # 只在 mktemp -d 造临时仓库，不碰真实 skill、也不碰 draft 的 git 历史。
 set -u
 
@@ -1039,6 +1039,126 @@ case_coverage_gate() {
     fi
 }
 }
+# ---------------------------------------------------------------- H46 活动分钟口径
+
+write_ledger() {  # $1=repo $2..=若干「多少分钟前」的 worker 事件
+    _wl_repo="$1"; shift
+    : > "$_wl_repo/.autopilot/ledger.jsonl"
+    for _wl_m in "$@"; do
+        printf '{"type": "worker", "ts": "%s"}\n' "$(now_minus_aware "$_wl_m")" \
+            >> "$_wl_repo/.autopilot/ledger.jsonl"
+    done
+}
+
+put_budget() {  # $1=repo $2=## BUDGET 段正文；空串=完全不写这段
+    [ -n "$2" ] || return 0
+    printf '\n## BUDGET\n\n%s\n' "$2" >> "$1/.autopilot/GOAL.md"
+}
+
+case_minute_basis() {
+    # 1) 关闭态：GOAL 没写 ## BUDGET → 一个字都不多，用时与停止判定仍按墙钟
+    r=$(new_repo h46a)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r/.autopilot/GOAL.md"
+    write_state "$r/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r" 1000 998 996
+    out=$($PY "$STATUS" summary "$r" 2>&1)
+    if ! printf '%s' "$out" | grep -q "预算口径" \
+       && printf '%s' "$out" | grep -qE "用时: (999|1000)/600 分钟" \
+       && printf '%s' "$out" | grep -q "时长预算耗尽"; then
+        pass 18 "GOAL 未声明 BUDGET 时 summary 与旧口径逐字一致（墙钟 1000/600、照常停机）"
+    else
+        fail 18 "关闭态被改了：$out"
+    fi
+
+    # 2) minute_basis = active → 预算改按活动分钟，墙钟仍照打（两个数都要看得见）
+    r2=$(new_repo h46b)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r2/.autopilot/GOAL.md"
+    put_budget "$r2" "minute_basis = active"
+    write_state "$r2/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r2" 1000 998 996
+    out2=$($PY "$STATUS" summary "$r2" 2>&1)
+    if printf '%s' "$out2" | grep -q "用时: 4/600 分钟" \
+       && printf '%s' "$out2" | grep -q "按活动分钟计 4/600" \
+       && printf '%s' "$out2" | grep -qE "墙钟 (999|1000)" \
+       && ! printf '%s' "$out2" | grep -q "时长预算耗尽"; then
+        pass 18 "密集事件下活动分钟=4（3 段各 2 分钟取相邻间隔），预算不再被墙钟烧穿"
+    else
+        fail 18 "active 口径没生效或墙钟被藏起来了：$out2"
+    fi
+
+    # 3) 隔了一夜的大空档只按上限（45 分钟）计入：2+45+2=49，不是 500
+    r3=$(new_repo h46c)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r3/.autopilot/GOAL.md"
+    put_budget "$r3" "minute_basis = active"
+    write_state "$r3/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r3" 1000 998 500 498
+    out3=$($PY "$STATUS" summary "$r3" 2>&1)
+    if printf '%s' "$out3" | grep -q "用时: 49/600 分钟"; then
+        pass 18 "498 分钟的空档被折成 45 分钟上限（2+45+2=49），停机过夜不再烧预算"
+    else
+        fail 18 "空档折叠算错：$(printf '%s' "$out3" | grep 用时)"
+    fi
+
+    # 4) 声明了 active 但账本只有 1 条 → 算不出活动时长，必须回落墙钟（更严的那个赢）
+    r4=$(new_repo h46d)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r4/.autopilot/GOAL.md"
+    put_budget "$r4" "minute_basis = active"
+    write_state "$r4/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r4" 5
+    out4=$($PY "$STATUS" summary "$r4" 2>&1)
+    if printf '%s' "$out4" | grep -qE "预算口径: 时长按墙钟计 (999|1000)/600" \
+       && printf '%s' "$out4" | grep -q "账本事件不足 2 条，回落墙钟" \
+       && printf '%s' "$out4" | grep -q "时长预算耗尽"; then
+        pass 18 "算不出活动时长时回落墙钟并说明原因，绝不会顺手放宽停机条件"
+    else
+        fail 18 "回落路径不对：$out4"
+    fi
+
+    # 5) idle_cap_min 想调小 = 想把「没干活的时间」洗成「没工作」→ 有下界挡着
+    r5=$(new_repo h46e)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r5/.autopilot/GOAL.md"
+    put_budget "$r5" "minute_basis = active
+idle_cap_min = 1"
+    write_state "$r5/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r5" 1000 998 500 498
+    out5=$($PY "$STATUS" summary "$r5" 2>&1)
+    if printf '%s' "$out5" | grep -q "用时: 14/600 分钟" \
+       && printf '%s' "$out5" | grep -q "低于下界，已按 10 分钟算"; then
+        pass 18 "idle_cap_min=1 被钉回 10 分钟下界（2+10+2=14）并声明了改写理由"
+    else
+        fail 18 "上限下界没生效：$out5"
+    fi
+
+    # 6) 值写错（不是 wall/active）→ 按墙钟，绝不因为笔误就放宽
+    r6=$(new_repo h46f)
+    printf '# GOAL\n\n终结目标：做 X\n' > "$r6/.autopilot/GOAL.md"
+    put_budget "$r6" "minute_basis = banana"
+    write_state "$r6/.autopilot/state.json" "\"$(now_minus_aware 1000)\""
+    write_ledger "$r6" 1000 998 500 498
+    out6=$($PY "$STATUS" summary "$r6" 2>&1)
+    if printf '%s' "$out6" | grep -qE "预算口径: 时长按墙钟计 (999|1000)/600" \
+       && printf '%s' "$out6" | grep -q "不是 wall/active，按墙钟算"; then
+        pass 18 "非法 minute_basis 值按墙钟处理并说明，写错方向不会变成放宽"
+    else
+        fail 18 "非法值处理不对：$out6"
+    fi
+
+    # 7) 接续包同步：没声明 = 一字不差；声明了 = 带上同一口径与停止判定（H28 同源）
+    out7=$($PY "$HERE/resume.py" "$r" 2>&1)
+    if ! printf '%s' "$out7" | grep -q "^用时:" \
+       && printf '%s' "$out7" | grep -q "停止:   未触发"; then
+        pass 18 "接续包在未声明 BUDGET 的工作区里不多一行，也不新增时长停止"
+    else
+        fail 18 "接续包关闭态被改了：$out7"
+    fi
+    out8=$($PY "$HERE/resume.py" "$r4" 2>&1)
+    if printf '%s' "$out8" | grep -qE "^用时:   (999|1000)/600 分钟（按墙钟计" \
+       && printf '%s' "$out8" | grep -q "时长预算耗尽（按墙钟，H46）"; then
+        pass 18 "接续包与 summary 用同一份口径：回落墙钟时两边都按墙钟停"
+    else
+        fail 18 "接续包口径不同源：$out8"
+    fi
+}
 case_naive
 case_garbage
 case_empty
@@ -1057,7 +1177,7 @@ case_coverage_check
 case_coverage_gate
 case_ruler_close_gate
 case_unwired_pairs
-case_unwired_pairs
+case_minute_basis
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"

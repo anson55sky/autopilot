@@ -456,6 +456,30 @@
   BUSY 时**不**给解锁命令（不引诱宿主抢锁）。
   证据：`scripts/trigger.selftest.sh` A-tr-01…15（16 项：关闭态、锁、上限、待批优先、阶段停止、
   零活动解锁、有活动不抢（含超 TTL 也不抢）、TTL 零活动解锁、decide 两面、claim 与 release 同判据）
+- **H45 待批计数按条目折叠（已实现 0.9.7，ContraRunner 值守实测倒逼；本条是补登记，代码与提交 `fb3a7e5` 在先）。**
+  `trigger.py` 原先按**账本行数**数「还有几条待批」，而 `inbox.jsonl` 是同一条目反复追加状态行（open → resolved → open…），
+  于是历史行被重复计入，幽灵 pending 数让自动接续**永久停摆**（decide 一直退 24）。
+  修法是复用 `inbox.py current_items()` 这一唯一实现源（H28）按 id 折叠出「当前态」再数 open，
+  trigger 不再自己数事件行。**关键陷阱**：折叠时必须把只带 `state:"open"`、没有 `type` 字段的历史行
+  归一成 `type:"open"`，否则折叠结果比原来更松 —— 这条不改，自检 A-tr-04 立刻变红，
+  「判定只更严」才有可执行的形式。
+  证据：`scripts/trigger.selftest.sh` A-tr-16（2 项）+ ContraRunner 实测（待决从虚高恢复为真值 1）。
+- **H46 时长预算的活动分钟口径（已实现，使用者明确指示「先修 ContraRunner 的活动分钟口径」）。**
+  先纠正我自己的一次误判：我一度把「墙钟口径」说成度量 bug，读代码后确认 H9 写的是**有意设计**
+  （「停止判定仍按墙钟，改口径需人工改 GOAL」）。但 ContraRunner 的 GOAL 里，人其实早就写了这句
+  「`max_minutes` 指**活动分钟**」（`## 预算口径（本 run 起，H9）`）——也就是说契约早就授权了活动口径，
+  缺的是脚本兑现；而无人值守长跑里没人有机会按 `pause/resume`，墙钟口径把跨天长跑必然烧死
+  （实测 `轮次 3/12 用时 1006/480 分钟`、pause 事件 **0** 条 → 无条件「时长预算耗尽」，自动接续装死）。
+  做法：GOAL 新增机器可读的 `## BUDGET` 段（`minute_basis = wall|active`、`idle_cap_min`），
+  `status.py gap_capped_minutes()` 把账本相邻事件间隔逐段累加、每段最多算 `idle_cap_min` 分钟。
+  四条不删护栏的约束：① **缺省 `wall`**，没写这段的老工作区输出逐字节不变（自检例 18 第 1 条锁死）；
+  ② 只认 GOAL，不认 `state.json`——`status.py budget` 是控制器自己写的入口，开放口径等于让控制器
+     放宽自己的停机条件；③ 算不出活动时长（事件不足 2 条）、值写错、`idle_cap_min` 低于 10 分钟，
+     三种情况一律回到**更严**的那个（墙钟 / 下界），且都在「口径说明」里打印，不静默；
+  ④ 墙钟数字照样打印，两个口径同时可见，REPORT 不能拿"扣掉休眠"当成绩。
+  `resume.py` 复用同一份实现（H28），接续包与 summary 不会各说一套。
+  证据：`scripts/status.selftest.sh` 例 18（8 项：关闭态一字不变 / 密集事件活动分钟 /
+  498 分钟空档折成 45 / 事件不足回落墙钟 / cap 下界 / 非法值 / 接续包关闭态 / 两端口径同源）。
 - **H43 lite 行为空槽闸门（已实现，使用者追问「技能能正常用了吗」时查出来的）。**
   我用真实临时仓把 lite 全链路走了一遍，发现 lite 起草的契约里，一句含行为需求的原话
   （"给 app.py 加 --name，传了就打印 hello <name>"）只会得到 `test -s app.py` —— **存在性检查冒充行为已测**。
@@ -473,22 +497,6 @@
   证据：`scripts/intake.selftest.sh` A-in-16（6 项：自动开槽并点名、未填拒绝、短理由被拒、
   长理由放行且落 intake.json 仍写 SKIP、填入真判据后无需理由放行、原话无行为动词不误开槽）；
   另修掉一处**我自己写的测试 bug**：那条正路用例最初只 re.subn 没写回文件，等于没填 —— 断言因此假失败。
-- **H43 lite 行为空槽闸门（已实现；使用者追问「技能能正常用了吗」时实测出来的）。**
-  我用真实临时仓把 lite 全链路走了一遍，发现一句含行为需求的原话（"给 app.py 加 --name，
-  传了就打印 hello <name>"）在 lite 契约里只会得到 `test -s app.py` —— **存在性检查冒充行为已测**。
-  这是 lite 面向非程序员时唯一的假绿入口。做法不是让 Python 假装读懂需求（它推不出预期输出），而是：
-  ① `judge_kind()` 把判据分 existence / behavioral（`test -s`、`ls`、`cat` 一类永远算 existence）；
-  ② 原话含行为动词而所有判据都只是存在性时，`behavior_gap()` 开**行为空槽**（judge 为空）
-     → 在 run.sh 里走既有的 `TODO` → `SKIP 待人工确认`，**绝不给 PASS**，也不拿存在性检查顶替；
-  ③ `intake.py check` 在空槽未填时拒绝（退 24），并直接印出「真跑一遍并断言输出」的填法示例；
-     确实决定不测才用 `--accept-untested "<≥20 字理由>"`，理由与条目落进 `intake.json` 的
-     `untested_accepted`（谁决定的、凭什么），且明写这些条目**仍判 SKIP**；
-  ④ 闸门装在 `check.sh freeze` 上，而不只是留给 `intake.py check`——否则它又变成我在 H40 里
-     批评过的「只写在文档里的软约束」。真仓实测：空槽未填时 freeze 退 **24 且零写盘**（不生成 MANIFEST）。
-  只对 lite 工作区生效（判据是 `.autopilot/intake.json` 是否存在），ContraRunner / WavePeek 标准档不受影响。
-  证据：`scripts/intake.selftest.sh` A-in-16（6 项：自动开槽并点名、未填拒绝、短理由被拒、长理由放行
-  且落 intake.json 仍写 SKIP、填入真判据后无需理由放行、原话无行为动词不误开槽）。
-  另修掉一处**我自己写的测试 bug**：正路那条最初只 `re.subn` 没写回文件，等于没填，导致断言假失败。
 - **H42 尺子冻结态闸门 + 冻结内容快照（已实现，ContraRunner r-02 由两名独立验证员分别踩出、我独立复现）。**
   19:44 重冻之后，我仍然派了写 `checks/probe-*.html` 的卡（T-13/T-23）且没随步重冻 —— 于是
   「18 条从 FAIL 转 PASS」这件事在盘上**无法归因**：到底是产品交付了，还是考卷被改了。
@@ -652,7 +660,7 @@
 
 | 短板 | 来源 | 归属 | 状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| 时长预算按墙钟计，休眠照扣（今晚烧掉 700+ 分钟直接停机） | 清/竞 | H9 | **部分已实现** | pause/resume 时间账 + summary/metrics 拆分已上线（status 自检例 9）；判定仍按墙钟，改口径需人工改 GOAL；"量化两个 run"还差一个 |
+| 时长预算按墙钟计，休眠照扣（今晚烧掉 700+ 分钟直接停机） | 清/竞 | H9 + H46 | **已实现** | pause/resume 时间账（status 自检例 9）+ GOAL `## BUDGET` 的 `minute_basis = active` 活动分钟口径（例 18）；缺省仍墙钟，口径只能由人写进 GOAL；"量化两个 run"还差一个 |
 | 无 LSP / 符号级工程索引，大仓吃亏 | 清/竞 | H21 | 已实现（粗粒度） | 只读 JSON 快照，零 DB、无常驻、上限外置并声明截断 |
 | 无容器/microVM 隔离 | 清/竞 | H13 + H27 | 已实现（默认关） | 模式 B 一直在；A 由 `sandbox.py probe` 探测，探不到判 SKIP 并出 DEGRADE；读拒绝按角色分档 |
 | 无观测看板 | 清/竞 | H15 | **已实现（只读、单文件、零外部引用）** | `tools/dashboard.py`，A-db-01…05 含「除 dashboard/ 外一字未动」 |

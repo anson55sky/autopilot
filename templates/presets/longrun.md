@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | P1 | 功能矩阵覆盖率单调不减 | 每轮记 covered/total；连续 `flex_no_progress_stop` 轮无新增 → 触发停止或批量升级 |
 | P2 | 收轮记账一致 | `close-round` 校验 `r-XX.tasks_closed` 与 `tasks.json` 实际一致（H12，对不上退 24） |
-| P3 | 时间账分得清墙钟与活动 | `status.py pause/resume` 配对；停机过夜的那段算休眠不计活动（H9），但**预算判定仍按墙钟**，不放宽 |
+| P3 | 时间账分得清墙钟与活动 | `status.py pause/resume` 配对；停机过夜的那段算休眠不计活动（H9），缺省**预算判定仍按墙钟**；跨天无人值守要让控制器自己在 GOAL 的 `## BUDGET` 里由人写 `minute_basis = active`（H46），否则墙钟必然烧穿预算、自动接续装死 |
 | P4 | 工具调用与成本入账 | `max_tool_calls` 数账本 `{"type":"tool"}`；`max_usd` 只认宿主上报（H8/H23），自估只展示 |
 
 ### 3. 长跑工艺

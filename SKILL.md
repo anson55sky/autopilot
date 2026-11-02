@@ -264,10 +264,16 @@ python3 $SKILL/scripts/toolgate.py rollback --repo $REPO --to snap-1
 1. 验收全绿（无 FAIL 且无 SKIP）
 2. 连续两轮零进展
 3. 预算耗尽（轮次/调用/时长/工具调用数；token 仅在宿主上报时作参考，不参与判定）
-   —— 时长**按墙钟**算：`status.py pause/resume` 能把空闲段拆出来做报告与量化（H9），
+   —— 时长**缺省按墙钟**算：`status.py pause/resume` 能把空闲段拆出来做报告与量化（H9），
    但判定仍按墙钟，**改成按活跃时长必须由人改 GOAL**，控制器不许自己放宽。
+   跨天长跑真正能用的是 H46：GOAL 里写 `## BUDGET` + `minute_basis = active`，判定改用
+   `gap_capped_minutes()` —— 账本相邻事件间隔逐段累加、每段封顶 `idle_cap_min`（缺省 45 分钟）。
+   无人值守时没人有机会按 pause，墙钟口径必然把长跑烧死（ContraRunner 实测 1006/480 分钟、
+   pause 事件 0 条 → 自动接续装死）。三条兜底一律朝更严的方向：算不出活动时长（事件不足 2 条）
+   回落墙钟、值写错按墙钟、`idle_cap_min` 低于 10 分钟按 10 分钟，且都写进「口径说明」不静默。
+   没写 `## BUDGET` 的工作区，`summary` 与接续包逐字节不变。
    `max_usd` 只认 `source=host` 的 usage 事件（H23）；`status.py budget` 只准新设或收紧，
-   放宽退 24 并被夹回更严值（H8）。
+   且不开放 `minute_basis` 这个键（H8）。
 4. 可判定证据不足（大面积 SKIP 或提案积压超 `heavy_proposals` 上限）
 
 停下只做**一次**批量升级：全部待决事项 + 选项 + 推荐 + 代价。
@@ -295,9 +301,10 @@ bash $SKILL/scripts/check.sh verify $REPO
 bash $SKILL/scripts/check.sh run $REPO
 python3 $SKILL/scripts/resume.py $REPO            # 任何新会话先跑这个
 python3 $SKILL/scripts/status.py summary $REPO
-python3 $SKILL/scripts/status.py pause $REPO --note "机器要休眠，先停表"   # H9 时间账，只报告不放宽判定
+python3 $SKILL/scripts/status.py pause $REPO --note "机器要休眠，先停表"   # H9 时间账，缺省不放宽判定
 python3 $SKILL/scripts/status.py resume $REPO
-python3 $SKILL/scripts/status.py budget $REPO max_tool_calls=400          # H8 只准新设或收紧
+python3 $SKILL/scripts/status.py budget $REPO max_tool_calls=400          # H8 只准新设或收紧（不含时长口径，H46）
+# 跨天长跑要按活动分钟计预算：由人在 GOAL.md 写 `## BUDGET` + `minute_basis = active`（H46），脚本不认 state.json
 python3 $SKILL/scripts/status.py log $REPO '{"type":"tool","name":"Bash"}'  # 工具调用计数来源
 python3 $SKILL/scripts/status.py log $REPO '{"type":"usage","usd":0.42,"source":"host"}'  # 只有 host 来源算数
 python3 $SKILL/scripts/status.py metrics $REPO N

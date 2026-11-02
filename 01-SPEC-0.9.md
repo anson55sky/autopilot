@@ -140,7 +140,7 @@ flex 卡一律 `FLEX-SERIAL`，照旧走串行（G4）。`tasks.json` 是唯一�
 | H8 | `state.budget.max_tool_calls` + 账本 `{"type":"tool"}` 计数；`status.py budget` 只准新设或收紧，放宽被夹回更严值，取消上限退 24 要人动手 | 脚本级 | status 自检例 13 |
 | H23 | `max_usd` 只认 `{"type":"usage","source":"host"}`；自估成本一律只显示、不进停止条件 | 脚本级 | status 自检例 13 |
 | H7 | 新模块 `scripts/toolgate.py`：`## TOOLBOX` 白名单 + 每轮上限 + 不可逆复用 `flexgate.DENY_PATTERNS` + 文件写快照/回滚；**副作用类工具 rollback 直接退 24** | 脚本级；闸门自身不执行任何工具 | `toolgate.selftest.sh` 24 项（A-tg-01…07） |
-| H9 | `status.py pause/resume` + `summary 时间账` + `metrics.slept_minutes/active_minutes`；判定仍按墙钟 | 脚本级（口径不放宽） | status 自检例 9 |
+| H9 | `status.py pause/resume` + `summary 时间账` + `metrics.slept_minutes/active_minutes`；判定缺省仍按墙钟，切换口径见 H46 | 脚本级（口径不自行放宽） | status 自检例 9 |
 | H20 | `environment.json.runtimes`（路径摘要 + 大小 + sha256 + 版本，**不含绝对路径**）；`environ.py runtimes` 漂移退 41；deny-list 增 PATH/系统二进制/`curl \| sh` | 脚本级；漂移不改判定，须 REPORT 声明 | environ 自检 E13–E16、flex-gate S29–S33 |
 | H29 | `tools/xref.py` 新增 X8：每条裁决必须引用脚本名 / 存在的自测编号 / 退出码 / §小节 | 脚本级（FAIL 退出 1） | xref X8：82 条全通过 |
 
@@ -202,6 +202,8 @@ lite 只是"契约由机器从一句话起草"，判定侧一字未松：SKIP �
 | H41 | `status.py coverage` 多一档 `UNWIRED`：拿 run.sh 已声明的 `A#:探针键` 映射表去 checks/ 的页面与产物里找那个键，找不到就点名「现在拿不到 PASS，缺的是尺子那一格」；只报告、不改判定、不动退出码（结果仍只认冻结 run.sh 的 RESULT 行） | 提示级（派工前给控制器看，不参与判定） | `status.selftest.sh` 例 16（2 项）+ ContraRunner 实测 14 条未接键 |
 | H42 | 派工前审「尺子还是不是那把被冻住的尺子」：`status.py ruler_audit()` 出三档 `drift`（在册文件哈希与冻结值不符）/ `unregistered`（冻结后新增的判定文件不在 MANIFEST，`shasum -c` 对它永远绿）/ `no_manifest`（有 checks/ 却从未冻结）；`dag_scheduler start` 在任何写动作前拦，退 **24**；放行只认 `--allow-ruler-drift --note <理由>`（无 note 退 2），尺子状态原文落账本 `ruler_drift` 字段。无 checks/ 的串行/早期工作区返回 ok 不误拦。同时 `check.sh freeze` 除哈希外存 `​.autopilot/frozen-checks.tar` 内容快照（在 checks/ 外，永不自己触发漂移），`verify` 检出漂移时打印可执行的 `diff -u` 对账命令并点名文件 —— 只存哈希回答不了「改动是否只更严」 | 脚本级（派发动作本身，与并发开关无关，关闭态也生效）；H40 管要不要动尺子、H41 管尺子接没接上、H42 管尺子还是不是冻住那把，三道闸门各自独立 | `dag-scheduler.selftest.sh` A-conc-15（10 项）+ `status.selftest.sh` 例 17（6 项，收轮同口径）+ `check.sh.selftest.sh` C18…C21（4 项）+ ContraRunner 实测（rc=4 漂移、probe-editor 未登记、probe-ui 虚拟时间下零上报已复现） |
 | H43 | lite 行为空槽闸门：`intake.py judge_kind()` 分 existence/behavioral，原话含行为动词而判据只有存在性时开**行为空槽**（run.sh 走 TODO→`SKIP 待人工确认`，绝不当 PASS，也不用 `test -s` 顶替）；`intake.py check` 未填即拒（退 24）并印出「真跑并断言输出」的填法；不测须 `--accept-untested "<≥20 字理由>"`，理由与条目落 `intake.json` 的 `untested_accepted`，条目仍判 SKIP；闸门装在 `check.sh freeze` 上而非只留给 check（否则又成文档级软约束） | 脚本级（冻结动作本身）；仅 lite 工作区生效（看 intake.json 在不在），标准档行为不变 | `intake.selftest.sh` A-in-16（6 项）+ 真仓实测 freeze 退 24、MANIFEST 零写盘 |
+| H45 | `trigger.py` 的待批计数改为按条目折叠：复用 `inbox.py current_items()` 这一唯一实现源（H28）算「当前态是 open 的条目数」，不再数账本/文件行数；无 `type` 只有 `state:"open"` 的历史行归一成 `type:"open"`（漏了这一步折叠结果会比原来更松） | 脚本级（decide 的 ASK-HUMAN 判据）；关闭态与老工作区行为不变 | `trigger.selftest.sh` A-tr-16（2 项）+ ContraRunner 实测（幽灵待决数导致自动接续永久停摆） |
+| H46 | 时长预算的活动分钟口径：GOAL 新增机器可读的 `## BUDGET`（`minute_basis` 取 wall 或 active、`idle_cap_min`）；`status.py gap_capped_minutes()` 把账本相邻事件间隔逐段累加、每段封顶 `idle_cap_min`，`minute_basis()` 是唯一实现源，`summary` 与 `resume.py` 都调它（H28）。口径**只能由人写进 GOAL**，`status.py budget` 不开放这个键；算不出活动时长（事件不足 2 条）/ 值写错 / `idle_cap_min` 低于 10 分钟，三种情况一律回到更严的那个并在「口径说明」里打印；墙钟数字照样显示，REPORT 不能拿扣休眠当成绩 | 脚本级；缺省 `wall`，未写 `## BUDGET` 的工作区 summary 与接续包逐字节不变（关闭态） | `status.selftest.sh` 例 18（8 项，含接续包同源）+ ContraRunner 实测（1006/480 墙钟装死 → 活动口径 349/900 未触发） |
 ---
 
 ## 3. 新增：预算隔离

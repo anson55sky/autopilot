@@ -287,6 +287,15 @@ def gather(root):
     stamp = state.get("started_at")
     if not stamp and rounds:
         stamp = rounds[-1].get("started_at")
+    # H46：时长预算口径。GOAL 没写 `## BUDGET` 时保持 None，接续包与旧版一字不差。
+    tb = None
+    if st_mod is not None:
+        try:
+            cand = st_mod.minute_basis(root, ap, events, started_at=stamp)
+        except Exception:                       # 接续包不能因为口径崩掉
+            cand = None
+        if isinstance(cand, dict) and (cand.get("basis") == "active" or cand.get("note")):
+            tb = cand        # H46：默认口径（墙钟）且没被改写 → 接续包一行都不多写
 
     epoch = tasks_doc.get("epoch") if isinstance(tasks_doc, dict) else None
     try:
@@ -321,6 +330,7 @@ def gather(root):
         "gate": read_gate(root), "epoch": epoch, "changelog_last": changelog_last,
         "symbols": symbols_line,
         "skipped": skipped, "host_text": host_text, "started_at": stamp,
+        "minute_basis": tb,
     }
 
 
@@ -343,6 +353,14 @@ def stop_reasons(g, ids):
     max_rounds = as_int(budget.get("max_rounds"))
     if max_rounds and as_int(s.get("rounds_used", 0)) >= max_rounds:
         stops.append("轮次预算耗尽")
+    # H46：时长预算只在 GOAL 写了 `## BUDGET` 时才进接续包的停止判定，
+    # 且口径由那份人工声明决定（wall 或 active），控制器自己无法放宽。
+    tb = g.get("minute_basis") or {}
+    max_minutes = as_int(budget.get("max_minutes"))
+    used_minutes = tb.get("used")
+    if max_minutes and used_minutes is not None and used_minutes >= max_minutes:
+        stops.append("时长预算耗尽（按%s，H46）"
+                     % ("活动分钟" if tb.get("basis") == "active" else "墙钟"))
     # H8/H23：工具调用与宿主上报成本（自估成本不进这里）
     max_tool_calls = as_int(budget.get("max_tool_calls"))
     if max_tool_calls and as_int(g.get("tool_calls", 0)) >= max_tool_calls:
@@ -394,6 +412,16 @@ def render(g):
     if extra:
         out.append("预算:   " + " · ".join(extra))
     out.append(f"时间:   {fmt_ts(g['started_at'])}")
+    tb = g.get("minute_basis") or {}
+    if tb:
+        # H46：GOAL 声明了时长口径才多这行，否则接续包与旧版一字不差
+        out.append(f"用时:   {tb.get('used') or '-'}"
+                   f"/{budget.get('max_minutes') or '-'} 分钟"
+                   f"（按{'活动分钟' if tb.get('basis') == 'active' else '墙钟'}计，"
+                   f"墙钟 {tb.get('wall') if tb.get('wall') is not None else '-'}"
+                   f" · 活动 {tb.get('active') if tb.get('active') is not None else '-'}）")
+        if tb.get("note"):
+            out.append(f"口径:   {tb['note']}")
     for w in TS_WARNINGS:
         out.append(f"警告:   {w}")
     if ids:

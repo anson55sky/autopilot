@@ -221,10 +221,11 @@ stop_phase        = report    # 到该阶段不再自动接续，交回人工
 - 每轮任务 ≤ {{MAX_TASKS}}
 - 并行 ≤ {{PARALLEL}}
 - 总时长 ≤ {{BUDGET_MIN}} 分钟（`started_at` 必须带时区偏移，C3：缺偏移会让 summary/resume 抛 TypeError 而非算错）
-  - 口径是**墙钟**：机器休眠、你离开不干活，照样计入（实测：一次 12 小时休眠烧掉 700+ 分钟）。
+  - 缺省口径是**墙钟**：机器休眠、你离开不干活，照样计入（实测：一次 12 小时休眠烧掉 700+ 分钟）。
     可用 `status.py pause/resume` 把不干活的时间拆出来，`summary` 会多出「时间账」一行、
     `metrics` 多 `slept_minutes / active_minutes` 两个字段 —— 但**停止判定仍按墙钟**（H9）。
-    要让判定改成按活跃时长，必须由人改本节，控制器不得自行放宽。
+    要让判定改成按活跃时长，必须由人改下面 `## BUDGET` 那节，控制器不得自行放宽。
+    无人值守长跑里没人有机会调 pause，所以跨天长跑真正要用的是 H46 的 `minute_basis = active`。
 - 子代理调用 ≤ {{MAX_CALLS}}
 - token：可选记录，缺省 `unset`，**不参与停止判定**（脚本层不可自观测，写进停止条件就是假指标）
   - 例外（H23）：**宿主上报**的用量可以参与判定。口径是账本里
@@ -235,6 +236,21 @@ stop_phase        = report    # 到该阶段不再自动接续，交回人工
   **放宽或取消上限属契约变更**，脚本会拒（退 24 / 夹回更严值），只能由人改 `state.json`。
 - flex 独立子预算：`flex_rounds / flex_calls / flex_minutes` 单独计数，
   缺省 ≤ 总预算 × `flex_budget_ratio`；耗尽自动回落 strict 并在本轮记 `flex_exhausted`（A3）
+
+## BUDGET
+
+minute_basis = wall      # H46 时长预算口径：wall（缺省，= 0.9.7 及更早）| active（按账本事件折叠出的活动分钟）
+idle_cap_min = 45        # 仅 active 生效：相邻两个账本事件之间最多算多少分钟工作
+
+- `active` 的算法：把账本里相邻事件的时间差逐段累加，每段最多算 `idle_cap_min` 分钟。
+  真在干活时事件是分钟级密集的，密集段照常计入；停机过夜那一晚最多只算 45 分钟。
+  跨天长跑必须用它 —— `pause/resume` 在无人值守下没人有机会按，墙钟口径会把长跑直接烧死。
+- 三条防放宽的下界，写错方向一律回到更严的那个：`idle_cap_min` 低于 10 分钟按 10 分钟算；
+  `minute_basis` 不是 wall/active 时按 wall 算；账本事件不足 2 条算不出活动时长时回落 wall。
+  任何回落或改写都会在 `summary` 的「口径说明」里打印，不静默。
+- 这个口径只认本文件，不认 `state.json`：`status.py budget` 是控制器自己写的入口，
+  把它开放给控制器等于让控制器改自己的停机条件。
+- 维持 `wall` 时（含本模板的缺省值），`summary` 与接续包不会多写任何一行。
 
 ## 停止条件
 
