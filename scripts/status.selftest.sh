@@ -318,6 +318,64 @@ EOF
     pass 9 "合同变更轮不计零进展，同 epoch 空轮仍计"
 }
 
+# ---------------------------------------------------------------- H47（轮次记录的 epoch 由工具盖章）
+
+# 上一条自测把 epoch 手写进 round JSON，所以它一直是绿的；而真实长跑里**没有任何写入方**
+# （ContraRunner r-01..r-12 的 rounds/r-*.json 全无 epoch 键），于是「合同变更轮算进展」在盘上从未生效。
+# 本条测的是写入方本身：报告不填 epoch 时，close-round 必须从 tasks.json.epoch 盖章。
+case_epoch_stamp() {
+    repo=$(new_repo c47)
+    mkdir -p "$repo/.autopilot/rounds"
+    cat > "$repo/.autopilot/state.json" <<'EOF'
+{"started_at": "2026-01-01T00:00:00+00:00", "phase": "execute", "rounds_used": 3, "closed_rounds": [1, 2, 3], "no_progress_streak": 1, "last_passed": ["A1"], "budget": {"max_rounds": 10}}
+EOF
+    cat > "$repo/.autopilot/tasks.json" <<'EOF'
+{"tasks": [], "epoch": 5}
+EOF
+    cat > "$repo/.autopilot/rounds/r-03.json" <<'EOF'
+{"round": 3, "epoch": 4, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    # 轮次报告里**故意不写 epoch** —— 正是历史上每一轮的真实形态
+    cat > "$repo/.autopilot/rounds/r-04.json" <<'EOF'
+{"round": 4, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    out=$($PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-04.json" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail 9 "未填 epoch 的轮次报告收轮退出码 $rc: $out"
+        return
+    fi
+    if ! $PY -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d.get("epoch") == 5 else 1)' "$repo/.autopilot/rounds/r-04.json"; then
+        fail 9 "close-round 没把 tasks.json 的 epoch=5 盖进轮次记录: $out"
+        return
+    fi
+    case "$out" in
+        *"合同 epoch 4→5"*) ;;
+        *) fail 9 "盖章后仍没认出合同变更（上一轮记录 epoch=4）: $out"; return ;;
+    esac
+    streak=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("no_progress_streak"))' "$repo/.autopilot/state.json")
+    if [ "$streak" != "0" ]; then
+        fail 9 "盖章轮的零进展连击应为 0，实际 $streak"
+        return
+    fi
+    # 反向不变：报告自报了 epoch 就不许被盘上的数覆盖（防"用当前 epoch 回填历史轮"）
+    cat > "$repo/.autopilot/tasks.json" <<'EOF'
+{"tasks": [], "epoch": 7}
+EOF
+    cat > "$repo/.autopilot/rounds/r-05.json" <<'EOF'
+{"round": 5, "epoch": 5, "verdict": "pass", "passed": ["A1"], "failed": [], "tasks_closed": 0}
+EOF
+    $PY "$STATUS" close-round "$repo" "$repo/.autopilot/rounds/r-05.json" >/dev/null 2>&1
+    kept=$($PY -c 'import json,sys; print(json.load(open(sys.argv[1])).get("epoch"))' "$repo/.autopilot/rounds/r-05.json")
+    if [ "$kept" != "5" ]; then
+        fail 9 "报告自报的 epoch 被 tasks.json 覆盖了（$kept≠5）—— 盖的是历史，不是当前值"
+        return
+    fi
+    pass 9 "epoch 由 close-round 从 tasks.json 盖章；报告自报值优先，不被覆盖"
+}
+
 # ---------------------------------------------------------------- C6（审计文件隔离 + 指标）
 
 case_audit_not_record() {
@@ -1166,6 +1224,7 @@ case_aware
 case_close_twice
 case_flex_round
 case_contract_change
+case_epoch_stamp
 case_audit_not_record
 case_metrics
 case_rework_parallel

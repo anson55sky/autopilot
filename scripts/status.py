@@ -1396,6 +1396,17 @@ def cmd_close_round(root, round_path, allow_ruler_drift=""):
     events = read_ledger(ap)
     tasks = load_tasks(ap)
 
+    # H47：轮次记录必须带上「本轮跑在哪个契约 epoch 上」。contract_change() 只认 round 记录里的
+    # epoch 键，而这个键此前**没有任何写入方**（merge 只 bump tasks.json 与 GOAL.md）——
+    # ContraRunner r-01..r-12 实测全都没有 epoch，于是「合同变更轮算进展」形同虚设：
+    # 纯尺子加固轮（tasks_closed=0、无新增 PASS）被误记零进展，连两轮就触发假停。
+    # 口径只认盘上权威源 tasks.json.epoch（由 proposal_merge 合并时写入），不接受轮次报告自报的
+    # 其它途径；报告里已给了 epoch 的不覆盖，也不去回填历史轮次（那是篡改已收轮记录）。
+    tasks_doc = load_json(os.path.join(ap, "tasks.json"), {})
+    live_epoch = to_int(tasks_doc.get("epoch")) if isinstance(tasks_doc, dict) else None
+    if live_epoch is not None and to_int(round_doc.get("epoch")) is None:
+        round_doc["epoch"] = live_epoch
+
     # ---- flex 用量：本轮增量 = 收轮时的累计 − 上一轮收轮时的累计，避免重复计数
     gate = read_gate(root, ap)
     cur = flex_snapshot(gate)
