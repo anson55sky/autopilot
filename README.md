@@ -9,6 +9,49 @@
 跨机器、跨操作系统（macOS / Linux / Windows）、跨 AI 后端可分发——脚本只用 POSIX sh 与 Python 标准库，
 不绑定任何厂商的 agent 运行时。
 
+## English (TL;DR)
+
+**autopilot** is an agent skill that turns *one terminal goal* into a fully self-driven
+development run: it splits the work, writes the contract, freezes the acceptance suite,
+dispatches worker tasks, re-runs the frozen judges independently, and closes gaps until every
+acceptance item is green or the budget is exhausted.
+
+The core of this project is **anti-cheating**, not code generation:
+
+- **Frozen ruler** — acceptance scripts are hash-locked in `checks/MANIFEST.sha256`; a one-byte
+  edit is detectable. Dispatch and round-close are both refused while the ruler drifts (H42).
+- **Workers cannot touch the test** — a task whose write-set includes a frozen judge file is
+  refused unless explicitly released with an auditable reason (H40).
+- **Contract changes only get stricter** — `add`/`tighten` merge automatically; `relax`/`remove`
+  require a per-item human confirmation marker.
+- **Mutation experiments** — deliberately break the product; if a judge stays green, it is
+  toothless and gets rebuilt. (Real case: `aimed` degraded to a fixed vector, homing turn-rate
+  set to 0 — both flipped green→red after tightening.)
+- **Round reconciliation** (H12) and **coverage gate** (H38) — reported numbers must match the
+  ledger, and every acceptance id must have a judge.
+- **Cross-session long runs** — all state lives on disk (`state.json`, `tasks.json`,
+  `ledger.jsonl`, `rounds/`), so a fresh session resumes from the files, not from chat memory.
+
+Zero third-party dependencies: POSIX `sh` + Python standard library only. Portable across
+machines, operating systems and AI backends.
+
+**Install**
+
+```bash
+git clone https://github.com/anson55sky/autopilot.git ~/.qoder-cn/skills/autopilot
+```
+
+**Start**
+
+```bash
+python3 ~/.qoder-cn/skills/autopilot/scripts/init.sh --goal "<one terminal goal>" /path/to/repo
+bash ~/.qoder-cn/skills/autopilot/scripts/check.sh freeze /path/to/repo   # freeze acceptance
+python3 ~/.qoder-cn/skills/autopilot/scripts/status.py summary /path/to/repo
+```
+
+Full English guide: [dist/README.en.md](dist/README.en.md) · License: Apache-2.0
+
+
 ---
 
 ## 为什么需要它
@@ -30,7 +73,7 @@
 | **strict**（默认） | 有明确验收标准的多文件项目 | 一卡一文件的 DAG、写集冲突判定、独立验收、收轮对账 |
 | **flex** | 需要探索性方案（选型、算法、重构） | 受控弹性轨道：沙箱探索 + 批量写令牌 + 提案合并，探索结论要过闸门才进主轨 |
 
-## 快速开始
+## 快速开始（安装 = 第一行 git clone）
 
 ```bash
 # 1. 装成 skill（Qoder / Claude Code / Codex 都读这个目录约定）
