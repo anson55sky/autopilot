@@ -421,7 +421,12 @@ def cmd_check(a):
     goal = read(os.path.join(ap, "GOAL.md"))
     runsh = read(os.path.join(ap, "checks", "run.sh"))
     ids = set(re.findall(r"^\|\s*(A\d+)\s*\|", goal, re.M))
-    emits = set(re.findall(r'check\s+"?(A\d+)\b', runsh))
+    # N1：发射位点口径与 status.py coverage 的判定源一致，不再假设 helper 一定叫 check——
+    # 认三种形态：引号里的 "A#"（含模板的 `check "A#"`）、`A#:探针键` 映射对、`RESULT A#`。
+    # 裸在注释里提到的 A#（无引号 / 非 RESULT / 非映射对）仍不算发射位点，免得"提到就算测了"。
+    emits = (set(re.findall(r'"(A\d{1,3})"', runsh))
+             | set(re.findall(r'\b(A\d{1,3}):[A-Za-z]', runsh))
+             | set(re.findall(r'RESULT\s+(A\d{1,3})\b', runsh)))
     missing = sorted(ids - emits, key=lambda s: int(s[1:]))
     extra = sorted(emits - ids, key=lambda s: int(s[1:]))
     if missing or extra:

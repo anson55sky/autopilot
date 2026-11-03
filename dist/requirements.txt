@@ -23,9 +23,9 @@
 # requires: git               可选但强烈建议：baseline 快照与并行 worktree 隔离依赖它。
 #                             无 git 时控制器一律串行，仍可跑，只是失去并行与快照对比。
 #
-# NOTE-SHELL: 0.9 已把 init.sh / check.sh / round_prompt.sh 降到 POSIX sh（shebang 为 #!/bin/sh，
-#   不用 pipefail 与 bash 参数展开）。**唯一仍需 bash 的是 scripts/notify.sh**（可选通知脚本，
-#   缺失不影响运行）。只有 dash/ksh 的环境可跑主流程。
+# NOTE-SHELL: 0.9 已把 init.sh / check.sh / round_prompt.sh / notify.sh 全部降到 POSIX sh
+#   （shebang #!/bin/sh，不用 pipefail 与 bash 参数展开）。无任何脚本依赖 bash；纯 sh/dash
+#   环境理论上可跑全流程，但 dash/busybox 运行期未实机验证（见下方 unverified）。notify.sh 可选，缺失不影响运行。
 # NOTE-PYTHON: python3 不可用 `python` 代替；版本 < 3.9 未验证（字典有序与 f-string 之外的
 #   语法依赖较少，但未在 3.8 上跑过，故不作承诺）。
 # NOTE-HASH: 只用 shasum 会导致精简 Linux 镜像直接失败（scripts/check.sh:26 / :29 / :47）。
@@ -90,5 +90,5 @@
 # unsupported: windows-native   原生 PowerShell / cmd **不承诺**：未验证，且 POSIX sh 与哈希工具存在差异。
 #                               详见 dist/cross-platform.md 末节"我们没测过就不要声称能用"。
 # unverified: alpine / busybox 工具链子集
-# unverified: 无 bash（仅 dash）环境
+# unverified: 无 bash（纯 dash/busybox sh）环境——脚本已全部降到 POSIX sh，但运行期未在 dash 实机验证
 # unverified: 无 python3 环境

@@ -224,7 +224,8 @@ python3 $SKILL/scripts/status.py task $REPO list [--json]
 1. 只有**同工作区、同 epoch、依赖已 done、写集互不冲突**的 strict 卡才会同时 READY；
    目录前缀算冲突（`src/a` 与 `src/a/x`）。`DEFER` 是冲突等待，`BLOCKED` 是依赖/epoch/Triage 未满足。
 2. flex 卡归类 `FLEX-SERIAL`，**不进调度器**，照旧走串行流程；`start` 对 flex 卡退 24。
-   多分支 flex 对比是 H35（待做），本版不实现。
+   多分支 flex 对比已落地为 H35（`scripts/flexbranch.py`，`FLEX_RULES.branch_max` 缺省 0=关，见 `00-DECISIONS.md`、`01-SPEC-0.9.md` §H35）；
+   但它仍不进并发调度器——分支只在同一张 flex 卡内对比，`pick` 只写 `sandbox/proposals/BRANCH_PICK-*.md` 提案，须 merge 批准 + epoch+1 才生效，且只有 Verifier 能定选择（见 §10、§11 H35 行）。
 3. 超时只记账：`recover` 把超过 `task_timeout_min` 的 RUNNING 标 failed/stale，**脚本自己从不杀工人**。
    `halt_policy = kill-running` 的唯一诚实形态是：`recover` 额外打印 `KILL <卡> session=<id>` 清单，
    由**执行器**去调宿主 `stop_chat_session`（G3/H6）；`host.json` 未上报 `kill_session` 时自动退化为

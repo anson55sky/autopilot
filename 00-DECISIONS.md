@@ -182,7 +182,7 @@
   证据：`scripts/dag_scheduler.py recover` + A-conc-05
 - **G4 第一版只调度 strict 卡。** flex 卡在 `plan/status` 显示 `FLEX-SERIAL`，不进调度器；
   `start` 对 flex 卡退 24。理由：flex 的闸门与独立预算必须保持串行语义，
-  并行探索分支（含"多分支对比"）只记 BACKLOG，不在本版实现。
+  并行探索分支（含"多分支对比"）只记 BACKLOG，不在本版实现。**（口径更新：多分支对比后由 H35 落地为 `scripts/flexbranch.py`，见本文 H35 条与 `01-SPEC-0.9.md`；但"flex 不进并发调度器、只调度 strict"这一条至今有效——H35 的分支对比发生在单张 flex 卡内部，不改变串行语义。）**
 - **G5 冲突与分类口径。** 写集冲突 = 相等或目录前缀包含（`src/a` 与 `src/a/x` 冲突）。
   `READY` 仅当：pending、非 flex、epoch 一致、deps 全 done、未命中 Triage 前提置疑、
   写集与 RUNNING 及本批已选卡都不冲突。冲突 → `DEFER`；依赖/epoch/Triage → `BLOCKED`。
@@ -477,6 +477,19 @@
      放宽自己的停机条件；③ 算不出活动时长（事件不足 2 条）、值写错、`idle_cap_min` 低于 10 分钟，
      三种情况一律回到**更严**的那个（墙钟 / 下界），且都在「口径说明」里打印，不静默；
   ④ 墙钟数字照样打印，两个口径同时可见，REPORT 不能拿"扣掉休眠"当成绩。
+- **H47 轮次记录的契约 epoch 由 close-round 盖章（已实现，ContraRunner r-12 揭出）。**
+  `contract_change()` 早在"合同变更轮不该计零进展"那次就上线了，但它只认 `rounds/r-XX.json` 里的
+  `epoch` 键，而**没有任何写入方**：`proposal_merge` 只 bump `tasks.json.epoch` 与 GOAL 的「契约 epoch」行，
+  `close-round` 从不盖章。ContraRunner r-01..r-12 的轮次记录**全部没有 epoch 键**（实测），
+  于是这条修复在真实长跑里从未生效 —— CP-13 那种纯尺子加固轮（`tasks_closed=0`、无新增 PASS）
+  被记成零进展，连两轮就触发「连续两轮零进展」假停。
+  **为什么自测没抓到**：`case_contract_change` 把 `epoch` **手写**进 fixture 的 round JSON，
+  测的是自己编的输入而不是写入方 —— 这是"自测绿 ≠ 功能生效"的又一种形态，新例 `case_epoch_stamp`
+  专门测盖章本身（报告不填 → 从 `tasks.json.epoch` 盖上、认出 4→5、连击归零；报告自填 → 不被当前值覆盖，
+  防"用现在的 epoch 回填历史轮"）。
+  口径：只认盘上权威源 `tasks.json.epoch`（由合并器写入，控制器改不动它），不认轮次报告里的
+  `contract_change` 文字描述；历史轮次一律不回填（已收轮的记录是历史证据，宁可少算一次进展也不篡改）。
+
   `resume.py` 复用同一份实现（H28），接续包与 summary 不会各说一套。
   证据：`scripts/status.selftest.sh` 例 18（8 项：关闭态一字不变 / 密集事件活动分钟 /
   498 分钟空档折成 45 / 事件不足回落墙钟 / cap 下界 / 非法值 / 接续包关闭态 / 两端口径同源）。

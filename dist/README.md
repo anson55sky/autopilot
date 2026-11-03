@@ -214,7 +214,7 @@ ${EDITOR:-vi} {REPO_ROOT}/.autopilot/REPORT.md
 | 6 | 生成的轮次提示词会展开成绝对路径 | `scripts/round_prompt.sh` 不再展开，改由执行器读 `.autopilot/env.json` 解析；提示词开头自带"路径解析"步骤 | **已修复** |
 | 7 | 仓库绝对路径被写入持久文件 | `GOAL.md` / `state.json` 只存占位符；真实路径统一进 `.autopilot/env.json`，并有生成后兜底占位化 | **已修复** |
 | 8 | 跨项目记忆路径不认 `AUTOPILOT_HOME` | `scripts/queue.py` 与 `scripts/playbook.py` 同源走 `AUTOPILOT_HOME` | **已修复** |
-| 9 | 脚本要求 bash，不是纯 POSIX sh | `init.sh` / `check.sh` / `round_prompt.sh` 已降到 POSIX sh | **部分修复**——`notify.sh` 仍是 bash，已在 `dist/requirements.txt` 如实声明 |
+| 9 | 脚本要求 bash，不是纯 POSIX sh | `init.sh` / `check.sh` / `round_prompt.sh` / `notify.sh` 全部降到 POSIX sh（`#!/bin/sh`、无 `pipefail`、无 bash 参数展开） | **已修复**——无任何脚本依赖 bash；`notify.sh` 经 `sh -n`/`bash -n` 双验，无 webhook→退 0、空参→退 2 行为不变。dash/busybox 运行期仍标 unverified（未在 dash 实机跑） |
 | 10 | skill 目录不在版本控制下 | 切换器 `tools/cutover.sh` 第一步就 `git init` + 打 `v0.8-baseline` tag，回滚命令随切换打印 | **已修复**（随切换落地） |
 | 11 | Windows 原生路径未验证 | 不承诺。请走 WSL；见 `dist/cross-platform.md` 末节 | **未验证，不承诺** |
 | 12 | Host Adapter 只有一个真实映射经过实测 | 两个后端的**进程级**驱动性已实跑通过（可脚本启动、退出码可读、沙箱生效、干净终止）；端到端模型调用因**使用者凭据**失败，不在本包范围 | **部分修复**——`intercept_permission` / `ask_human` 两条原语维持"未验证"标注；换后端时按 `.autopilot/host.json` 重新声明能力矩阵 |
@@ -312,11 +312,11 @@ It never changes the acceptance matrix mid-run. Exploration output can never be 
 ## Known limitations
 
 The table above lists the twelve technical debts found while drafting 0.8, each with its 0.9 outcome:
-eight are **fixed** (externalized skill-scan roots, placeholder paths with the machine-local truth in
+nine are **fixed** (externalized skill-scan roots, placeholder paths with the machine-local truth in
 `env.json`, three interchangeable hash backends, absolute paths no longer written into prompts or
-persisted state, one consistent `AUTOPILOT_HOME`, POSIX-sh scripts, version control with a baseline
-tag, path-neutral acceptance); three are **partially fixed** (timestamps are still local wall time
-where the 0.8 ledger wrote them, `notify.sh` still needs bash, and only the process-level half of the
+persisted state, one consistent `AUTOPILOT_HOME`, POSIX-sh scripts including `notify.sh`, version
+control with a baseline tag, path-neutral acceptance); two are **partially fixed** (timestamps are still
+local wall time where the 0.8 ledger wrote them, and only the process-level half of the
 host adapter has been exercised); one is **explicitly not promised** (native Windows — use WSL).
 Details: `dist/cross-platform.md`, `specs/portability.md`, `MIGRATION.md`.
 

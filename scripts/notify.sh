@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # 可选：把长跑进展推到你自己的 webhook（飞书 / Slack）。默认不发，必须显式配置。
 # 用法: AUTOPILOT_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" notify.sh "文本"
 #      echo "文本" | notify.sh
-set -uo pipefail
+# POSIX sh：不依赖 bash（本脚本无管道需 pipefail；判定只取单条 curl 的退出码）。
+set -u
 
 HOOK="${AUTOPILOT_WEBHOOK:-}"
 if [ -z "$HOOK" ]; then

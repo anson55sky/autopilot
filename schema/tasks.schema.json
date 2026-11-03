@@ -76,6 +76,16 @@
           "items": { "$ref": "#/$defs/relpath" },
           "description": "strict 轨道缺省一卡一文件；多文件仅在持有 batch 令牌时合法（见 flex_permit）。"
         },
+        "touch_set": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relpath" },
+          "description": "N5：本卡方法学上会临时触碰、跑完逐字节还原的文件（如变异实验临时改 src/*.js）。不在声明写集里，但并发时会互相盖掉，故纳入 dag_scheduler 冲突判定。可缺省。"
+        },
+        "exclusive": {
+          "type": "boolean",
+          "description": "N5：true = 本卡不得与任何其他卡并发（无论写集/触碰集是否相交），用于会扰动全局的卡（全量验收独占、变异实验、快照类）。可缺省。"
+        },
         "acceptance": {
           "type": "array",
           "uniqueItems": true,

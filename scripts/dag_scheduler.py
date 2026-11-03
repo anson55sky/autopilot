@@ -234,6 +234,22 @@ def write_set_conflict(ws1, ws2):
     return any(paths_conflict(x, y) for x in ws1 for y in ws2)
 
 
+def _eff_set(t):
+    # N5：参与冲突判定的"有效写集" = 声明写集 ∪ 临时触碰集（touch_set，跑完还原的那种）。
+    return list(t.get("write_set") or []) + list(t.get("touch_set") or [])
+
+
+def tasks_conflict(a, b):
+    """两张卡能否并发。N5：
+    - 任一卡标 exclusive=true → 与任何其他卡都冲突（全量验收独占 / 变异实验 / 快照类会扰动全局）；
+    - 否则看 _eff_set（write_set ∪ touch_set）是否路径相交——T-22 这类卡声明写集只有 runs/，
+      但它每时每刻临时改 src/*.js 再逐字节还原，touch_set 必须参与判定，否则 plan 会误判可并发、
+      两张卡互相盖掉对方的 src 改动。"""
+    if a.get("exclusive") is True or b.get("exclusive") is True:
+        return True
+    return write_set_conflict(_eff_set(a), _eff_set(b))
+
+
 def find_task(tasks, tid):
     for t in tasks:
         if t.get("id") == tid:
@@ -304,13 +320,11 @@ def classify(tasks, cfg, epoch):
         if tag and tag in halted:
             blocked.append((tid, "TRIAGE-HALT " + tag))
             continue
-        clash = [r.get("id") for r in running
-                 if write_set_conflict(t.get("write_set") or [], r.get("write_set") or [])]
+        clash = [r.get("id") for r in running if tasks_conflict(t, r)]
         if clash:
             defer.append((tid, "conflict-with=" + ",".join(clash)))
             continue
-        clash = [s.get("id") for s in selected
-                 if write_set_conflict(t.get("write_set") or [], s.get("write_set") or [])]
+        clash = [s.get("id") for s in selected if tasks_conflict(t, s)]
         if clash:
             defer.append((tid, "conflict-with=" + ",".join(clash)))
             continue
@@ -405,16 +419,19 @@ def checks_edits(repo, task):
       - 新增判定源（例如给还没写的探针页）可以派工——它是把尺子接上，只会让漏判变少；
       - 改写既有判定文件等于改考卷：工人一旦被允许动 run.sh / accept.mjs / MANIFEST，
         "把 FAIL 改成 SKIP" 这类动作在结构上就没人拦得住（铁律「不改 checks/」的字面来源）。
-    所以后者必须由控制器/人显式放行并留下理由。判据看"文件在不在盘上"，不看路径写法，
-    免得用 ./ 或绝对路径绕开。
+    所以后者必须由控制器/人显式放行并留下理由。判据看"解析后的真实路径在不在 checks 目录下、
+    且盘上已存在"，不看路径写法（./、绝对路径、.autopilot 前缀都要认），避免绕过。
     """
+    checks_dir = os.path.join(os.path.abspath(repo), ".autopilot", "checks")
     hits = []
     for raw in (task.get("write_set") or []):
-        norm = str(raw).replace("\\", "/").lstrip("./")
-        if not norm.startswith(".autopilot/checks/"):
-            continue
-        if os.path.exists(os.path.join(os.path.abspath(repo), norm)):
-            hits.append(norm)
+        rel = str(raw).replace("\\", "/")
+        # 相对路径按仓库根解析；绝对路径原样。abspath 归一化掉 ./ 与 ../。
+        joined = rel if rel.startswith("/") else os.path.join(os.path.abspath(repo), rel)
+        resolved = os.path.abspath(joined)
+        if resolved == checks_dir or resolved.startswith(checks_dir + os.sep):
+            if os.path.exists(resolved):
+                hits.append(rel)
     return hits
 
 
@@ -469,10 +486,9 @@ def cmd_start(args):
                       % (args.task, tag))
                 return E_STATE
             running = running_tasks(tasks)
-            clash = [r.get("id") for r in running
-                     if write_set_conflict(task.get("write_set") or [], r.get("write_set") or [])]
+            clash = [r.get("id") for r in running if tasks_conflict(task, r)]
             if clash:
-                print("CONFLICT %s 写集与运行中卡重叠: %s" % (args.task, ",".join(clash)))
+                print("CONFLICT %s 与运行中卡冲突（写集∪touch_set 相交，或任一为 exclusive 独占）: %s" % (args.task, ",".join(clash)))
                 return E_CONFLICT
             # H42：尺子不在冻结态就别派工。drift/unregistered/no_manifest 三种都意味着
             # 工人跑回来的 RESULT 行不受冻结保护 —— 红绿无法归因到底是产品变了还是考卷变了。

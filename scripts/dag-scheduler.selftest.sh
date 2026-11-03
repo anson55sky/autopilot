@@ -1,5 +1,5 @@
 #!/bin/sh
-# P2 并发调度自测：A-conc-01..15（11 kill/上限来源，12 非幂等闸，13 H30 可重放，
+# P2 并发调度自测：A-conc-01..16（11 kill/上限来源，12 非幂等闸，13 H30 可重放，
 # 14 判定文件写集闸 H40，15 尺子冻结态闸 H42）。
 # 只在 mktemp -d 造临时工作区，不碰真实仓库、不碰线上 skill。
 # 判定口径：每例一行 PASS/FAIL；任何 FAIL 退出 1。
@@ -86,9 +86,8 @@ expect_not_contains() {
 
 # ---------------------------------------------------------------- A-conc-01 关闭态等价
 
-# A-conc-01 关闭态逐字节等价 + 关闭态统一退出码 23
-case_replay_determinism
-case_checks_edit_gate() {
+# A-conc-13 H30 派发决策可重放：同一 tasks.json 连跑 5 次，退出码与输出逐字节一致
+case_replay_determinism() {
     # H30：派发决策必须是纯函数 —— 同一 tasks.json 连跑 5 次，输出逐字节相同
     repo=$(new_repo a13)
     goal_on "$repo" 3
@@ -767,6 +766,8 @@ case_checks_edit_gate() {
     mkdir -p "$repo/.autopilot/checks"
     printf '#!/bin/sh\necho "RESULT A1 PASS ok"\n' > "$repo/.autopilot/checks/run.sh"
     printf '#!/bin/sh\n\n' > "$repo/.autopilot/checks/accept.sh"
+    # 夹具必须先冻结尺子，否则 start 会被 H42（no_manifest）抢先退 24，走不到 H40 改考卷闸门。
+    freeze_manifest_sh "$repo"
     write_tasks "$repo" <<EOF
 {"tasks": [
  {"id": "T-61", "title": "T-61", "role": "Builder", "status": "pending", "deps": [],
@@ -801,10 +802,46 @@ import json, sys
 ev = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
 hit = [e for e in ev if e.get("task") == "T-64" and e.get("checks_edit")]
 miss = [e for e in ev if e.get("task") == "T-62" and e.get("checks_edit")]
-sys.exit(0 if len(hit) == 1 and "accept.sh" in hit[0]["checks_edit"] and not miss else 1)
+sys.exit(0 if len(hit) == 1 and any("accept.sh" in e for e in hit[0]["checks_edit"]) and not miss else 1)
 PY
     then pass 14 "改尺子的事实进账本（checks_edit 列出被动的判定文件），新增探针页不污染该字段"
     else fail 14 "checks_edit 留痕不对"; fi
+}
+
+# ---------------------------------------------------------------- A-conc-16 N5：touch_set / exclusive 冲突
+
+# A-conc-16 临时触碰集与独占卡必须参与并发冲突判定（T-22 变异实验教训）
+case_touch_exclusive() {
+    repo=$(new_repo a16)
+    goal_on "$repo"
+    write_tasks "$repo" <<EOF
+{"tasks": [
+ $(task_json T-101 '[]' '["src/a.js"]' 'doing'),
+ $(task_json T-102 '[]' '["src/b.js"]' 'pending' ',"touch_set":["src/a.js"]'),
+ $(task_json T-103 '[]' '["src/c.js"]' 'pending'),
+ $(task_json T-104 '[]' '["src/d.js"]' 'pending' ',"exclusive":true')
+], "epoch": 0}
+EOF
+    "$PY" "$SCHED" plan --repo "$repo" >"$TMPROOT/a16.plan" 2>&1
+    expect_contains 16 "$TMPROOT/a16.plan" "DEFER T-102 conflict-with=T-101" "touch_set 与运行卡写集相交也算冲突（跑完还原的临时触碰不能并发）"
+    expect_contains 16 "$TMPROOT/a16.plan" "READY T-103" "与运行卡写集/touch 都不交集才 READY"
+    expect_contains 16 "$TMPROOT/a16.plan" "DEFER T-104 conflict-with=T-101" "exclusive 卡不得与任何运行卡并发（与路径无关）"
+
+    repo2=$(new_repo a16b)
+    goal_on "$repo2"
+    write_tasks "$repo2" <<EOF
+{"tasks": [
+ $(task_json T-105 '[]' '["src/x.js"]' 'pending' ',"exclusive":true'),
+ $(task_json T-106 '[]' '["src/y.js"]' 'pending')
+], "epoch": 0}
+EOF
+    "$PY" "$SCHED" plan --repo "$repo2" >"$TMPROOT/a16b.plan" 2>&1
+    expect_contains 16 "$TMPROOT/a16b.plan" "READY T-105" "无运行卡时 exclusive 卡可 READY"
+    "$PY" "$SCHED" start --repo "$repo2" --task T-105 >/dev/null 2>&1
+    expect_rc 16 0 "$?" "start exclusive T-105"
+    "$PY" "$SCHED" start --repo "$repo2" --task T-106 >"$TMPROOT/a16b.start106" 2>&1
+    expect_rc 16 22 "$?" "另一张普通卡不得与运行中的 exclusive 并发（退 22）"
+    expect_contains 16 "$TMPROOT/a16b.start106" "CONFLICT T-106" "独占冲突提示含卡号"
 }
 
 case_disabled_equivalence
@@ -819,8 +856,10 @@ case_slots
 case_flex_serial
 case_kill_and_limit_source
 case_idempotent_gate
+case_checks_edit_gate
 case_replay_determinism
 case_ruler_drift_gate
+case_touch_exclusive
 
 if [ "$FAILED" -gt 0 ]; then
     printf '== 失败 %s 项（通过 %s 项）==\n' "$FAILED" "$PASSED"
