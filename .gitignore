@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
+sandbox/
+*.bak
+*.bak-*
+.autopilot/locks/
+*.tmp
