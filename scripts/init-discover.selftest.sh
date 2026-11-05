@@ -356,6 +356,64 @@ else
   printf 'rc=%s\n' "$RC15"
 fi
 
+# --- 16. H46 时长口径：缺省产物与 0.9.7 逐字节一致 -------------------------
+REPO16="$TMP/repo16"
+mkdir -p "$REPO16"
+sh "$INIT_SH" --goal "缺省口径" --repo "$REPO16" >"$TMP/out16" 2>&1
+G16="$REPO16/.autopilot/GOAL.md"
+if grep -qxF 'minute_basis = wall      # H46 时长预算口径：wall（缺省，= 0.9.7 及更早）| active（按账本事件折叠出的活动分钟）' "$G16" \
+   && ! grep -q '{{' "$G16"; then
+  pass 16 "不加 --unattended：minute_basis 行逐字节不变，无残留占位符"
+else
+  fail 16 "不加 --unattended：minute_basis 行逐字节不变，无残留占位符"
+  grep -n 'minute_basis' "$G16" | head -3
+fi
+
+# --- 17. --unattended "原话"：改写现有 ## BUDGET 行，并把原话留在同一行 -----
+REPO17="$TMP/repo17"
+mkdir -p "$REPO17"
+sh "$INIT_SH" --goal "无人值守长跑" --repo "$REPO17" \
+  --unattended "跨天连着跑，按活动分钟算" >"$TMP/out17" 2>&1
+G17="$REPO17/.autopilot/GOAL.md"
+python3 "$SELF_DIR/status.py" log "$REPO17" '{"type":"round","round":1,"note":"t17a"}' >/dev/null 2>&1
+python3 "$SELF_DIR/status.py" log "$REPO17" '{"type":"round","round":2,"note":"t17b"}' >/dev/null 2>&1
+S17=$(python3 "$SELF_DIR/status.py" summary "$REPO17" 2>&1)
+if printf '%s' "$S17" | grep -q '时长按活动分钟计' \
+   && grep -q '^minute_basis = active' "$G17" \
+   && grep -q '人授权无人值守：跨天连着跑，按活动分钟算' "$G17"; then
+  pass 17 "--unattended 写 active + 原话入档 + summary 按活动分钟"
+else
+  fail 17 "--unattended 写 active + 原话入档 + summary 按活动分钟"
+  grep -n '^minute_basis' "$G17"
+  printf '%s\n' "$S17" | grep -E '预算口径|用时' | head -2
+fi
+
+# --- 18. 口径开关只认 GOAL：status.py budget 不接受 minute_basis ------------
+python3 "$SELF_DIR/status.py" budget "$REPO17" minute_basis=wall >"$TMP/out18" 2>&1
+RC18=$?
+if [ "$RC18" -ne 0 ] && grep -q '^minute_basis = active' "$G17"; then
+  pass 18 "控制器用 status.py budget 改口径被拒（退 $RC18），GOAL 仍是 active"
+else
+  fail 18 "控制器用 status.py budget 改口径被拒"
+  printf 'rc=%s\n' "$RC18"
+  head -2 "$TMP/out18"
+  grep -n '^minute_basis' "$G17"
+fi
+
+# --- 19. 三道拒绝：空原话 / 缺参数 / 与 --probe-only 冲突，且不写坏目录 -----
+REPO19="$TMP/repo19"
+mkdir -p "$REPO19"
+sh "$INIT_SH" --goal x --repo "$REPO19" --unattended "" >/dev/null 2>&1; RC19A=$?
+sh "$INIT_SH" --goal x --repo "$REPO19" --unattended >/dev/null 2>&1; RC19B=$?
+sh "$INIT_SH" --probe-only "$REPO16" --unattended "跨天" >/dev/null 2>&1; RC19C=$?
+if [ "$RC19A" -eq 2 ] && [ "$RC19B" -eq 2 ] && [ "$RC19C" -eq 2 ] \
+   && [ -z "$(ls -A "$REPO19" 2>/dev/null)" ] && ! grep -q '^minute_basis = active' "$G16"; then
+  pass 19 "空原话/缺参数/与 probe-only 冲突均退 2，且没落下半个工作区"
+else
+  fail 19 "空原话/缺参数/与 probe-only 冲突均退 2，且没落下半个工作区"
+  printf 'rc=%s %s %s repo19=%s\n' "$RC19A" "$RC19B" "$RC19C" "$(ls -A "$REPO19" 2>/dev/null | tr '\n' ' ')"
+fi
+
 if [ "$FAILED" -eq 0 ]; then
   printf 'ALL PASS\n'
   exit 0

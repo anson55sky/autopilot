@@ -239,7 +239,7 @@ stop_phase        = report    # 到该阶段不再自动接续，交回人工
 
 ## BUDGET
 
-minute_basis = wall      # H46 时长预算口径：wall（缺省，= 0.9.7 及更早）| active（按账本事件折叠出的活动分钟）
+minute_basis = {{MINUTE_BASIS}}      # H46 时长预算口径：wall（缺省，= 0.9.7 及更早）| active（按账本事件折叠出的活动分钟）{{BASIS_NOTE}}
 idle_cap_min = 45        # 仅 active 生效：相邻两个账本事件之间最多算多少分钟工作
 
 - `active` 的算法：把账本里相邻事件的时间差逐段累加，每段最多算 `idle_cap_min` 分钟。

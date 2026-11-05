@@ -18,6 +18,8 @@ MAX_ROUNDS=6
 MAX_TASKS=8
 PARALLEL=3
 BUDGET_MIN=240
+MINUTE_BASIS="wall"
+BASIS_QUOTE=""
 MAX_CALLS=120
 MAX_TOOL_CALLS=0
 MAX_USD=0
@@ -41,6 +43,10 @@ usage() {
   --max-tasks N      每轮最多任务（默认 8）
   --parallel N       并行工人数（默认 3）
   --budget-min N     总时长上限，分钟（默认 240）
+  --unattended "原话" 无人值守长跑：把 GOAL 的 ## BUDGET 口径改写为 minute_basis = active（H46）。
+                     必须带人类授权原话（引号包起来），原话会写进 GOAL 那行的注释里存档。
+                     这是**放宽停机条件**，只能由人说；不给原话直接拒（退 2）。
+                     不加 = 维持缺省 wall，产物与旧版逐字节一致。
   --max-calls N      子代理调用上限（默认 120）
   --max-tool-calls N 工具调用上限（默认 0=不设，H8；账本里 type=tool 的事件计数）
   --max-usd X        成本上限 USD（默认 0=不设；只认宿主上报 source=host 的 usage 事件，H23）
@@ -78,6 +84,10 @@ while [ $# -gt 0 ]; do
     --max-tasks)   [ $# -ge 2 ] || die "--max-tasks 缺参数"; MAX_TASKS="$2"; shift 2 ;;
     --parallel)    [ $# -ge 2 ] || die "--parallel 缺参数"; PARALLEL="$2"; shift 2 ;;
     --budget-min)  [ $# -ge 2 ] || die "--budget-min 缺参数"; BUDGET_MIN="$2"; shift 2 ;;
+    --unattended)  [ $# -ge 2 ] || die "--unattended 需要人类授权原话，例：--unattended \"跨天连着跑，按活动分钟算\"";
+                   BASIS_QUOTE=$(printf '%s' "$2" | tr '\n' ' ' | sed 's/  */ /g');
+                   [ -n "$(printf '%s' "$BASIS_QUOTE" | tr -d ' ')" ] || die "--unattended 的原话是空的：口径开关只认人写的这句话";
+                   MINUTE_BASIS="active"; shift 2 ;;
     --max-calls)   [ $# -ge 2 ] || die "--max-calls 缺参数"; MAX_CALLS="$2"; shift 2 ;;
     --max-tool-calls) [ $# -ge 2 ] || die "--max-tool-calls 缺参数"; MAX_TOOL_CALLS="$2"; shift 2 ;;
     --max-usd)     [ $# -ge 2 ] || die "--max-usd 缺参数"; MAX_USD="$2"; shift 2 ;;
@@ -106,6 +116,9 @@ case "$PRESET" in
 esac
 if [ "$LITE" = 1 ] && [ "$PROBE_ONLY" = 1 ]; then
   die "--lite 与 --probe-only 互斥：lite 只在新建工作区时起草契约，重探环境不重写契约"
+fi
+if [ "$MINUTE_BASIS" = "active" ] && [ "$PROBE_ONLY" = 1 ]; then
+  die "--unattended 与 --probe-only 互斥：口径写进 GOAL.md，而 --probe-only 明确不碰 GOAL.md"
 fi
 case "$MODE" in
   build|fix|auto) ;;
@@ -321,6 +334,7 @@ HOST_PROFILES="$SKILL_ROOT/config/host-profiles.json"
 AP="$AP" TPL_DIR="$TPL_DIR" GOAL_TEXT="$GOAL" REPO_PATH="$REPO" \
 RUN_MODE="$MODE" MAX_ROUNDS="$MAX_ROUNDS" MAX_TASKS="$MAX_TASKS" PARALLEL="$PARALLEL" \
 BUDGET_MIN="$BUDGET_MIN" MAX_CALLS="$MAX_CALLS" \
+MINUTE_BASIS="$MINUTE_BASIS" BASIS_QUOTE="$BASIS_QUOTE" \
 MAX_TOOL_CALLS="$MAX_TOOL_CALLS" MAX_USD="$MAX_USD" SKILL_ROOT_PATH="$SKILL_ROOT" \
 SKILL_ROOTS_RAW="$SKILL_ROOTS" CONFIG_PATH="$CONFIG" AUTOPILOT_HOME_DIR="$AUTOPILOT_HOME_DIR" \
 HASH_IMPL="$HASH_IMPL" OS_KIND="$OS_KIND" HOST_NAME="$HOST_NAME" HOST_SOURCE="$HOST_SOURCE" \
@@ -344,6 +358,12 @@ now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 if write_workspace:
     # 生成物里只放占位符：真实路径由读取时替换或查 env.json。
+    # H46 时长口径：只有人在 init 时给了 --unattended "原话" 才写 active，
+    # 且把那句原话留在 GOAL 同一行的注释里 —— 口径的真值来源永远是这份 GOAL。
+    basis = os.environ.get("MINUTE_BASIS", "wall") or "wall"
+    quote = (os.environ.get("BASIS_QUOTE", "") or "").strip().replace("#", "＃")
+    basis_note = ("｜人授权无人值守：%s（要撤回就把本行改回 wall）" % quote
+                  if basis == "active" and quote else "")
     repl = {
         "{{GOAL}}": goal,
         "{{REPO_ROOT}}": "{REPO_ROOT}",
@@ -354,6 +374,8 @@ if write_workspace:
         "{{MAX_TASKS}}": os.environ["MAX_TASKS"],
         "{{PARALLEL}}": os.environ["PARALLEL"],
         "{{BUDGET_MIN}}": os.environ["BUDGET_MIN"],
+        "{{MINUTE_BASIS}}": basis,
+        "{{BASIS_NOTE}}": basis_note,
         "{{MAX_CALLS}}": os.environ["MAX_CALLS"],
         "{{DATE}}": now,
         # 新 run 的契约 epoch 恒为 0（与下面写进 state.json 的 epoch 同源）；
@@ -659,6 +681,9 @@ fi
 
 note "工作区: {REPO_ROOT}/.autopilot（本机真实路径见 .autopilot/env.json）"
 note "目标:   {REPO_ROOT}/.autopilot/GOAL.md"
+if [ "$MINUTE_BASIS" = "active" ]; then
+  note "口径:   时长预算按活动分钟计（H46，人授权原话已写进 GOAL 的 ## BUDGET 行）；其余四把闸不受影响"
+fi
 note "环境:   {REPO_ROOT}/.autopilot/env.json（skill_root / repo_root / skill_roots 本机真值）"
 note "宿主:   {REPO_ROOT}/.autopilot/host.json（5 原语能力矩阵；缺能力即降级，须在 REPORT 声明）"
 note "探测:   {REPO_ROOT}/.autopilot/environment.json（本机能力；缺能力项验收走 SKIP）"

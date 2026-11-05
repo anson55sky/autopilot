@@ -273,6 +273,10 @@ python3 $SKILL/scripts/toolgate.py rollback --repo $REPO --to snap-1
    pause 事件 0 条 → 自动接续装死）。三条兜底一律朝更严的方向：算不出活动时长（事件不足 2 条）
    回落墙钟、值写错按墙钟、`idle_cap_min` 低于 10 分钟按 10 分钟，且都写进「口径说明」不静默。
    没写 `## BUDGET` 的工作区，`summary` 与接续包逐字节不变。
+   这一行的**人来说的入口**是 `init.sh --unattended "<原话>"`（H46 后续）：只有人给了这句话，
+   建工作区时才把 `minute_basis` 改写成 `active`，并把原话留在 GOAL 同一行的注释里存档；
+   不给原话直接拒（退 2），空原话也拒。控制器仍不能自己拨 —— 运行期只读 GOAL，
+   `status.py budget minute_basis=…` 一律拒（init-discover 自检例 18 钉死）。
    `max_usd` 只认 `source=host` 的 usage 事件（H23）；`status.py budget` 只准新设或收紧，
    且不开放 `minute_basis` 这个键（H8）。
 4. 可判定证据不足（大面积 SKIP 或提案积压超 `heavy_proposals` 上限）
@@ -305,7 +309,7 @@ python3 $SKILL/scripts/status.py summary $REPO
 python3 $SKILL/scripts/status.py pause $REPO --note "机器要休眠，先停表"   # H9 时间账，缺省不放宽判定
 python3 $SKILL/scripts/status.py resume $REPO
 python3 $SKILL/scripts/status.py budget $REPO max_tool_calls=400          # H8 只准新设或收紧（不含时长口径，H46）
-# 跨天长跑要按活动分钟计预算：由人在 GOAL.md 写 `## BUDGET` + `minute_basis = active`（H46），脚本不认 state.json
+# 跨天长跑要按活动分钟计预算：人说 `init.sh --unattended "<原话>"`（建工作区时改写这一行），或事后自己改 GOAL.md 的 `## BUDGET` + `minute_basis = active`（H46），脚本不认 state.json
 python3 $SKILL/scripts/status.py log $REPO '{"type":"tool","name":"Bash"}'  # 工具调用计数来源
 python3 $SKILL/scripts/status.py log $REPO '{"type":"usage","usd":0.42,"source":"host"}'  # 只有 host 来源算数
 python3 $SKILL/scripts/status.py metrics $REPO N
